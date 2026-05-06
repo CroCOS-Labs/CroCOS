@@ -121,7 +121,18 @@ namespace arch::amd64{
         __builtin_unreachable();
     }
 
+    bool supportsNXBit() {
+        uint32_t eax, ebx, ecx, edx;
+        eax = 0x80000001;
+        ecx = 0;
+        asm volatile("cpuid"
+                : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                : "c"(ecx));
+        return (edx & (1 << 20)) != 0;
+    }
+
     bool enableNXBit() {
+        assert(supportsNXBit(), "Your CPU doesn't support the NX bit");
         constexpr uint32_t IA32_EFER_MSR = 0xC0000080;
         uint64_t efer = rdmsr(IA32_EFER_MSR);
         wrmsr(IA32_EFER_MSR, efer | (1ULL << 11));
