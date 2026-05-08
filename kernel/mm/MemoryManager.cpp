@@ -123,6 +123,7 @@ namespace kernel::mm{
                 auto ptentry = KMemRegionEntryType::subtableEntry(data.pageTableAddress);
                 ptentry.markPresent();
                 ptentry.enableWrite();
+                ptentry.enableExecute(false);
                 getPageTableEntryForZone(PAGE_ALLOCATOR_ZONE_START + gMappedPageAllocatorBuffers) = ptentry;
             } // TempWindow destructor clears temp zone and flushes TLB, activating the new zone entry
 
