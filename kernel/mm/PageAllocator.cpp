@@ -171,7 +171,7 @@ size_t SmallPageAllocator::alloc(PageAllocationCallback cb, size_t count, Occupa
         }
     }
 
-    const auto prevAllocated = allocatedCount.fetch_add(static_cast<SmallPageCount>(allocated), ACQ_REL);
+    const size_t prevAllocated = allocatedCount.fetch_add(static_cast<SmallPageCount>(allocated), ACQ_REL);
     transition.before = stateFromCount(prevAllocated, maxAlloc);
     transition.after  = stateFromCount(static_cast<size_t>(prevAllocated) + allocated, maxAlloc);
     return allocated;
@@ -197,7 +197,7 @@ void SmallPageAllocator::free(PageRef* pages, size_t count, OccupancyTransition&
         assert(!(old & pending[w]), "Double free: page is already in freeBitmap");
     }
 
-    const auto prevAllocated = allocatedCount.fetch_sub(static_cast<SmallPageCount>(count), ACQ_REL);
+    const size_t prevAllocated = allocatedCount.fetch_sub(static_cast<SmallPageCount>(count), ACQ_REL);
     transition.before = stateFromCount(prevAllocated, maxAlloc);
     transition.after  = stateFromCount(static_cast<size_t>(prevAllocated) - count, maxAlloc);
 }
@@ -212,7 +212,7 @@ bool SmallPageAllocator::isPageFree(PageRef page) const {
 }
 
 bool SmallPageAllocator::isEmpty() const {
-    return allocatedCount.load(ACQUIRE) == 0;
+    return allocatedCount.load(ACQUIRE) == 0 && reservedCount == 0;
 }
 
 bool SmallPageAllocator::isFull() const {
@@ -1056,9 +1056,10 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
     allocateFromPAPages(PA_BITPOOL_RELAXED_RETRIES);
     while (smallPageCount > 0) {
         const auto requiredPages = divideAndRoundUp(smallPageCount, mm::PageAllocator::smallPagesPerBigPage);
+        const auto bigPageDivisible = ((smallPageCount & (mm::PageAllocator::smallPagesPerBigPage - 1)) == 0);
         const auto grabbedPages = freeBigPages.bulkReadBestEffort(requiredPages, [&](size_t index, auto& metadata) {
             assert(metadata -> isEmpty(), "Big pages in the free pool should be FREE");
-            if (index == 0) {
+            if (index == 0 && !bigPageDivisible) {
                 paPageRemaining = metadata;
             }
             else {
@@ -1069,6 +1070,15 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
         });
         if (grabbedPages == 0) {
             break;
+        }
+        if (bigPageDivisible) {
+            // We successfully gave out grabbedPages as whole big pages!
+            allocatedPages += grabbedPages * mm::PageAllocator::smallPagesPerBigPage;
+            smallPageCount -= grabbedPages * mm::PageAllocator::smallPagesPerBigPage;
+
+            // Continue the loop. If we fulfilled the whole request, smallPageCount
+            // is now 0 and the while loop naturally terminates.
+            continue;
         }
         if (grabbedPages < requiredPages) {
             const auto pageAddr = paPageRemaining -> baseAddr();
@@ -1125,7 +1135,13 @@ void NUMAPool::freePages(PageRef *pages, size_t count) {
                 // practical consequence is that BIG_PAGE_ONLY allocations cannot see it
                 // until it is reclaimed.
                 if (paPages.remove(metadataIndex(superpage)) != AtomicBitPool::RemoveResult::NotPresent) {
-                    freeBigPages.write(superpage);
+                    // ABA TRAP: We successfully removed it from paPages, but we must verify
+                    // it didn't get reused and become non-empty while we were preempted!
+                    if (!superpage->isEmpty()) {
+                        paPages.add(metadataIndex(superpage));
+                    } else {
+                        freeBigPages.write(superpage);
+                    }
                 }
             } else {
                 // Full→Empty: page was never in paPages, return it directly.
@@ -1253,18 +1269,21 @@ namespace kernel::mm::PageAllocator {
     phys_addr allocateSmallPage() {
         phys_addr result{};
         (void)gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); });
+        assert(result.value < 0xffe0000, "Result out of bounds???");
         return result;
     }
 
     phys_addr allocateSmallPage(numa::DomainID targetDomain) {
         phys_addr result{};
         (void)gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); }, targetDomain);
+        assert(result.value < 0xffe0000, "Result out of bounds???");
         return result;
     }
 
     phys_addr allocateSmallPage(arch::ProcessorID targetProc) {
         phys_addr result{};
         (void)gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); }, targetProc);
+        assert(result.value < 0xffe0000, "Result out of bounds???");
         return result;
     }
 
