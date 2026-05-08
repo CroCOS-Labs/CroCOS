@@ -9,6 +9,7 @@
 #include <arch/amd64/smp.h>
 #include <init.h>
 #include <arch.h>
+#include <mem/VMSubstrate.h>
 
 // NOLINTBEGIN
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
@@ -46,23 +47,23 @@ namespace kernel{
         return true;
     }
 
-    using PagePool = mm::phys_addr[2048];
+    using PagePool = void*[2048];
 
     PagePool page_pools[16];
 
-    // Original naiveTest - page allocator stress test
     [[noreturn]] bool naiveTest() {
-        klog() << "Running test on CPU " << arch::getCurrentProcessorID() << "\n";
+        klog() << "Running VMSubstrate test on CPU " << arch::getCurrentProcessorID() << "\n";
+        constexpr size_t kPageCount = sizeof(PagePool) / sizeof(void*);
         while (true) {
-            for (size_t i = 0; i < sizeof(PagePool) / sizeof(mm::phys_addr); i++) {
-                auto& page = page_pools[arch::getCurrentProcessorID()][i];
-                page = mm::PageAllocator::allocateSmallPage();
-                assert(page.value % arch::smallPageSize == 0, "The allocator has given me nonsense.");
+            auto& pool = page_pools[arch::getCurrentProcessorID()];
+            for (size_t i = 0; i < kPageCount; i++) {
+                pool[i] = mm::VMSubstrate::allocPage();
+                assert(pool[i] != nullptr, "VMSubstrate::allocPage returned null");
+                *static_cast<volatile size_t*>(pool[i]) = i;
             }
-            for (size_t i = 0; i < sizeof(PagePool) / sizeof(mm::phys_addr); i++) {
-                auto& page = page_pools[arch::getCurrentProcessorID()][i];
-                assert(page.value % arch::smallPageSize == 0, "There is a strange memory corruption error.");
-                mm::PageAllocator::freeSmallPage(page);
+            for (size_t i = 0; i < kPageCount; i++) {
+                assert(*static_cast<volatile size_t*>(pool[i]) == i, "VMSubstrate page content corrupted");
+                mm::VMSubstrate::freePage(pool[i]);
             }
         }
     }
