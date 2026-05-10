@@ -257,11 +257,13 @@ namespace kernel::timing {
     }
 
     QueuedEventHandle enqueueEvent(TimerEventCallback&& cb, uint64_t preferredDelayMs, uint64_t lateTolerance, uint64_t earlyTolerance) {
+        arch::InterruptDisabler id;
         return localQueue().enqueueTimerEvent(move(cb), monoTimens() + preferredDelayMs * 1'000'000,
             lateTolerance * 1'000'000, earlyTolerance * 1'000'000);
     }
 
     bool cancelEvent(QueuedEventHandle handle) {
+        arch::InterruptDisabler id;
         return localQueue().cancelTimerEvent(handle);
     }
 }
