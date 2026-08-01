@@ -1,11 +1,27 @@
+# ─── Build output ──────────────────────────────────────────────────────────
 cmake-build-amd64-kernel-debug/
 cmake-build-release/
 cmake-build-debug/
 cmake-build-o2/
 tests/build/
-tools/__pycache__
 stress_tests/build/
+build/
+tools/__pycache__
 profile/
-CLAUDE.md
 compile_commands.json
 test.img
+
+# ─── Editor / IDE ──────────────────────────────────────────────────────────
+.idea/
+.zed/
+
+# ─── macOS ─────────────────────────────────────────────────────────────────
+.DS_Store
+
+# ─── Claude Code ───────────────────────────────────────────────────────────
+# Personal overrides only. .claude/settings.json and .claude/skills/ are
+# deliberately NOT ignored — the skills directory holds this project's spec
+# workflow (spec-init / refine / review / resolve / implement / status), which
+# is shared tooling rather than local state.
+.claude/settings.local.json
+CLAUDE.md

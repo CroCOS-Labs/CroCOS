@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(x86_64-elf-objdump *)",
+      "Bash(x86_64-elf-nm *)",
+      "Bash(x86_64-elf-addr2line *)",
+      "Bash(x86_64-elf-readelf *)"
+    ]
+  }
+}
