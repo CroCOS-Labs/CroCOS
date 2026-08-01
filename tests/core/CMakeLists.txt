@@ -27,6 +27,8 @@ target_sources(CoreTests PRIVATE
     AtomicBitPoolTest.cpp
     SplitBitmapTest.cpp
     TreiberStackTest.cpp
+    RcuEpochDomainTest.cpp
+    RcuConcurrentTest.cpp
     #AtomicBitPoolGlobalLockMock.cpp
     #AtomicBitPoolConcurrentLinkedList.cpp
 )
@@ -181,6 +183,8 @@ target_sources(CoreTestsTSan PRIVATE
     AtomicBitPoolTest.cpp
     SplitBitmapTest.cpp
     TreiberStackTest.cpp
+    RcuEpochDomainTest.cpp
+    RcuConcurrentTest.cpp
 )
 
 target_include_directories(CoreTestsTSan PUBLIC

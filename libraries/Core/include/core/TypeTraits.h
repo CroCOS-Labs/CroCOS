@@ -185,6 +185,16 @@ constexpr const char* type_name() {
 template <typename T>
 constexpr bool is_enum_v = __is_enum(T);
 
+// Wrapped in a variable template rather than used inline: GCC 15 rejects a
+// built-in trait appearing directly in a function signature ("use library traits
+// instead"), which bites `requires __is_constructible(T)` constraints on
+// constructors. Clang accepts them, so this only shows up on the cross build.
+template <typename T, typename... Args>
+constexpr bool is_constructible_v = __is_constructible(T, Args...);
+
+template <typename T>
+constexpr bool is_default_constructible_v = __is_constructible(T);
+
 template <typename T>
 using degrade_enum = __underlying_type(T);
 
