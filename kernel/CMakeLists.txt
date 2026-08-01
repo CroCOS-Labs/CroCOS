@@ -76,6 +76,7 @@ set(KERNEL_SRC
         mm/VMSubstrateSlab.cpp
         mm/vmsmalloc.cpp
         VmsmallocStress.cpp
+        rcu/RCU.cpp
         CpuLocal.cpp
         arch/amd64/CpuLocalBase.cpp
 )

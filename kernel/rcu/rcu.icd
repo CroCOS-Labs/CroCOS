@@ -1,0 +1,22 @@
+[RCU]
+
+# P2-DEC-004. memory_management, after VMSubstrateSlab: init() needs
+# reservePerDomainStaticBuffer (VMSubstrate) and the deleters bottom out in
+# vmsfree (VMSubstrateSlab).
+#
+# per_cpu = false makes this an implicit all-CPU barrier — APs spin on its
+# completion (kernel/init.cpp:112-114) — which is exactly what is wanted: slots
+# must exist before any AP can enter a section.
+#
+# NOTE the .icd glob in kernel/CMakeLists.txt is a configure-time GLOB_RECURSE.
+# Adding a file here without re-running CMake configure leaves the component
+# silently unregistered: the kernel boots fine and the domain is simply never
+# initialized, which per the phase's failure table is the worst possible
+# failure mode.
+
+name = "RCU"
+required = true
+per_cpu = false
+phase = "memory_management"
+depends_on = ["VMSubstrateSlab"]
+routine = "kernel::rcu::initialize"

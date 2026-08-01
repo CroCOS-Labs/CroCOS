@@ -299,12 +299,17 @@ inline void sameDomainPublishAndMaybeFlush(arch::ProcessorID i,
 
 // DEC-014 (amended ITEM-052, + #UD/#DF per user direction): vmsmalloc / vmsfree
 // must not run from IRQ/NMI/#UD/#DF/#GP/#MC context (same-CPU reentry hazard on
-// the magazine). #PF is conditionally legal and is NOT in the set. Reads the
-// per-CPU interrupt-context depth counters maintained by the InterruptContextGuard.
+// the magazine). #PF is conditionally legal and is NOT in the set.
+//
+// The policy moved into <interrupts/InterruptContextDepths.h> as
+// kAllocForbiddenDepthMask when RCU became a second consumer of the same rule
+// (RCU-DEC-012): RCU's retire/drain deleters bottom out in vmsfree, so it
+// cannot be more permissive, and one shared predicate beats two that can drift.
+// The packed counters (RCU-DEC-026) make this one load, one AND, one test
+// instead of six loads and six branches.
 inline bool inForbiddenContextForVmsmalloc() {
-    const auto& d = kernel::interrupts::currentCpuInterruptDepths();
-    return d.irq > 0 || d.nmi > 0 || d.ud > 0
-        || d.df  > 0 || d.gp  > 0 || d.mc > 0;
+    return kernel::interrupts::inForbiddenContext(
+        kernel::interrupts::kAllocForbiddenDepthMask);
 }
 
 // DEC-030 caller-side contract (P7-DEC-003): the caller must hold the thread

@@ -34,6 +34,14 @@ namespace {
     constexpr size_t kRegionBytes = size_t{64} * 1024 * 1024;   // 64 MiB (P8-DEC-001)
     const size_t     kPageSize    = arch::smallPageSize;
 
+    // Headroom in the static-buffer region above vmsmalloc's own per-domain
+    // buffers, for other consumers of reservePerDomainStaticBuffer. RCU Phase 2
+    // is the first: kernel::rcu::Domain::init reserves one page per 32 CPUs per
+    // domain constructed, and the RCU harness builds several domains per test.
+    // Without this the bump pointer runs past gStaticEnd and MockVMSubstrate
+    // aborts the whole runner rather than failing a test.
+    constexpr size_t kExtraStaticPages = 256;
+
     std::mutex        gMutex;
     uint8_t*          gRegion       = nullptr;   // mmap base (== vmsBase)
     size_t            gRegionBytes  = 0;
@@ -83,10 +91,17 @@ void* mapMMIOPage(phys_addr) { std::abort(); }
 
 void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID) {
     std::lock_guard<std::mutex> lock(gMutex);
+    // Rounded to whole pages, exactly like the kernel's implementation
+    // (VMSubstrate.cpp:982). Two consumers depend on it: every reservation comes
+    // back page-aligned (RCU's slot array is alignas(64) and would otherwise be
+    // misaligned behind an unrounded vmsmalloc buffer), and consecutive
+    // reservations stay exactly pageSize apart, which is the contiguity property
+    // kernel::rcu::Domain::init checks for.
+    const size_t pages = (byteSize + kPageSize - 1) / kPageSize;
     uint8_t* p = gStaticNext;
-    gStaticNext += byteSize;
+    gStaticNext += pages * kPageSize;
     if (gStaticNext > gStaticEnd) { std::abort(); }
-    std::memset(p, 0, byteSize);   // zero-fill contract
+    std::memset(p, 0, pages * kPageSize);   // zero-fill contract
     return p;
 }
 
@@ -109,7 +124,8 @@ void initialize(size_t cpuCount, size_t domainCount) {
 
     // Layout: guard page, then static-buffer region, then CpuLocal pages, then pool.
     uint8_t* p = gRegion + kPageSize;                       // skip guard page (offset 0)
-    const size_t staticBytes = domainCount * vmsmalloc::kPerDomainBufBytes;
+    const size_t staticBytes =
+        domainCount * vmsmalloc::kPerDomainBufBytes + kExtraStaticPages * kPageSize;
     gStaticNext  = p;
     gStaticEnd   = p + staticBytes;
     p += staticBytes;

@@ -72,9 +72,13 @@ add_custom_target(run_all_tests
     COMMAND liballoc/LibAllocTestRunner
     COMMAND kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunner
     COMMAND kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunnerTSan
+    COMMAND kernel/rcu/KernelRcuIntegrationTestRunner
+    COMMAND kernel/rcu/KernelRcuIntegrationTestRunnerTSan
     DEPENDS core/CoreTestRunner liballoc/LibAllocTestRunner kernel/KernelTestRunner
             kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunner
             kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunnerTSan
+            kernel/rcu/KernelRcuIntegrationTestRunner
+            kernel/rcu/KernelRcuIntegrationTestRunnerTSan
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running all CroCOS unit tests"
 )

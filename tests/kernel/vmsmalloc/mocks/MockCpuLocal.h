@@ -21,4 +21,12 @@ namespace kernel::test {
     void bindThreadToCpu(arch::ProcessorID i);
 }
 
+namespace arch::test {
+    // Set what arch::processorCount() reports. RCU Phase 2 sizes its slot array
+    // off it at Domain::init, so a harness that configures N CPUs and then binds
+    // threads to them must say so first — the mock's default of 8 would
+    // under-reserve for a larger configuration and over-reserve for a smaller.
+    void setProcessorCount(size_t n);
+}
+
 #endif // CROCOS_MOCK_CPULOCAL_H

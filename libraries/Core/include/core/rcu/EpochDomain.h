@@ -119,8 +119,15 @@ namespace Core::rcu {
     // is what keeps the engine free of templates over the retired type.
     //
     // `next` doubles as the already-linked marker for the double-retire debug
-    // assert: it is nullptr exactly when the node is not in a bag. The drain
-    // clears it before handing the node to its deleter.
+    // assert, and the drain clears it before handing the node to its deleter.
+    //
+    // The marker is BEST-EFFORT, not exact — an earlier version of this comment
+    // claimed nullptr "exactly when the node is not in a bag", which is false for
+    // the node at a bag's HEAD: pushNode sets next to the previous head, so the
+    // first node pushed into an empty bag legitimately carries nullptr and a
+    // double retire of it is undetectable. Every later node is caught. Making
+    // this exact would cost a second field or a sentinel, on a check that exists
+    // only in debug builds; the hole is recorded rather than closed.
     struct RetireHead {
         RetireHead* next    = nullptr;
         void      (*deleter)(RetireHead*) = nullptr;
@@ -832,6 +839,17 @@ namespace Core::rcu {
         }
 
         [[nodiscard]] size_t getSlotCount() const CROCOS_RCU_NOEXCEPT { return slotCount; }
+
+        // Is the owner of `slot` currently inside a read-side section? Reads
+        // owner-only plain state (I5), so it is meaningful ONLY when called by
+        // that slot's own owner — which is exactly how Phase 2's `protect` uses
+        // it, to debug-assert the caller entered a section before loading a
+        // published link. Not a protocol operation and not a synchronization
+        // point; anyone else calling it is reading a racing plain word.
+        [[nodiscard]] bool inSection(size_t slot) const CROCOS_RCU_NOEXCEPT {
+            assert(slot < slotCount, "rcu: slot index out of range");
+            return slots[slot].nesting > 0;
+        }
 
     private:
         friend struct DebugIntrospection<Hooks>;

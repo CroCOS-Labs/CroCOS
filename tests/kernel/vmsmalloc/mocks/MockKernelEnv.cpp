@@ -33,7 +33,13 @@ ProcessorID getCurrentProcessorID() { return tlBoundCpu; }
 size_t      processorCount()        { return gProcessorCount; }
 size_t      getCacheLineSize()      { return 64; }
 
-namespace test { void setBoundCpu(ProcessorID i) { tlBoundCpu = i; } }
+namespace test {
+    void setBoundCpu(ProcessorID i) { tlBoundCpu = i; }
+    // RCU Phase 2 sizes its slot array off processorCount(), so a harness that
+    // configures N CPUs must be able to say so — a fixed 8 would either
+    // over-reserve or, worse, under-reserve relative to the CPUs tests bind to.
+    void setProcessorCount(size_t n) { gProcessorCount = n; }
+}
 }
 
 // ─── kernel: logging + panic plumbing ──────────────────────────────────────
@@ -63,10 +69,30 @@ namespace test {
 }
 }
 
-// ─── kernel::interrupts: all-zeros depths (never in interrupt context) ──────
+// ─── kernel::interrupts: settable per-thread depths ─────────────────────────
+//
+// Zero by default, so vmsmalloc's own tests never see a forbidden context (no
+// real interrupts in userspace). RCU Phase 2 needs them SETTABLE: its two-tier
+// context rules (retire tolerates #PF, synchronize/barrier do not) are only
+// distinguishable if a test can put the thread in a specific context, and with
+// permanently-zero depths that whole class of assertion is untested. Per-thread
+// because each harness thread models one CPU.
 namespace kernel::interrupts {
-namespace { thread_local InterruptContextDepths tlZeroDepths{}; }
-const InterruptContextDepths& currentCpuInterruptDepths() noexcept { return tlZeroDepths; }
+namespace { thread_local InterruptContextDepths tlDepths{}; }
+const InterruptContextDepths& currentCpuInterruptDepths() noexcept { return tlDepths; }
+
+// Mirrors the real definition in kernel/interrupts/InterruptContextDepths.cpp,
+// which this harness does not build. Kept as a real implementation over
+// tlDepths rather than a hardcoded `false`, so the masking logic itself is
+// exercised rather than stubbed past.
+bool inForbiddenContext(uint64_t forbiddenMask) noexcept {
+    return (currentCpuInterruptDepths().packed() & forbiddenMask) != 0;
+}
+
+namespace test {
+    InterruptContextDepths& mutableInterruptDepths() noexcept { return tlDepths; }
+    void resetInterruptDepths() noexcept { tlDepths = InterruptContextDepths{}; }
+}
 }
 
 // ─── kernel::test: per-thread CpuLocal binding ─────────────────────────────

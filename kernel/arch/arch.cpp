@@ -59,6 +59,12 @@ namespace arch{
     InterruptDisabler::InterruptDisabler() {
         active = true;
         wasEnabled = areInterruptsEnabled();
+        // Record the prior state BEFORE masking, then actually mask. The
+        // disableInterrupts() call was missing until 2026-08-01, which made
+        // this a save/restore helper that disabled nothing — every call site
+        // (ClockManager::compareTimerTicks, the TimerQueues mutation paths)
+        // ran its critical section with interrupts live.
+        disableInterrupts();
     }
 
     void InterruptDisabler::release() {

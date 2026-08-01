@@ -13,13 +13,14 @@
 
 #include <interrupts/InterruptContextDepths.h>
 #include <CpuLocal.h>
+#include <assert.h>
 
 namespace kernel::interrupts {
 
 namespace {
     // Pointer to the per-CPU counter for a tracked kind, or nullptr for the
     // un-tracked InterruptKind::Other (the guard treats Other as a no-op).
-    inline uint32_t* counterFor(InterruptContextDepths& d, arch::InterruptKind k) noexcept {
+    inline uint8_t* counterFor(InterruptContextDepths& d, arch::InterruptKind k) noexcept {
         switch (k) {
             case arch::InterruptKind::IRQ: return &d.irq;
             case arch::InterruptKind::NMI: return &d.nmi;
@@ -38,14 +39,25 @@ const InterruptContextDepths& currentCpuInterruptDepths() noexcept {
     return kernel::cpuLocal().interruptDepths;
 }
 
+bool inForbiddenContext(uint64_t forbiddenMask) noexcept {
+    return (currentCpuInterruptDepths().packed() & forbiddenMask) != 0;
+}
+
 InterruptContextGuard::InterruptContextGuard(arch::InterruptKind k) noexcept : kind_(k) {
-    if (uint32_t* c = counterFor(kernel::cpuLocal().interruptDepths, kind_)) {
+    if (uint8_t* c = counterFor(kernel::cpuLocal().interruptDepths, kind_)) {
+        // The counters are uint8_t (RCU-DEC-026). Nesting this deep is not
+        // reachable — IRQ nesting is 0 or 1 given IF-clear dispatch, and
+        // exception nesting hits #DF long first — but a wrapped counter would
+        // silently disable every forbidden-context check, so it is worth an
+        // assert rather than a comment.
+        assert(*c != 0xFF, "InterruptContextDepths counter would overflow");
         ++*c;
     }
 }
 
 InterruptContextGuard::~InterruptContextGuard() noexcept {
-    if (uint32_t* c = counterFor(kernel::cpuLocal().interruptDepths, kind_)) {
+    if (uint8_t* c = counterFor(kernel::cpuLocal().interruptDepths, kind_)) {
+        assert(*c != 0, "InterruptContextDepths counter underflow — unbalanced guard");
         --*c;
     }
 }
