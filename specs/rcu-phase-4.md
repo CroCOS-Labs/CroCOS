@@ -77,6 +77,7 @@ Parent ITEM-021 is this phase's charter and should close against it.
 | P4-ITEM-003 | Open | No | | Should the stress also exercise `synchronize` / `barrier`, which no in-kernel path calls today? | The spike drives `ReadGuard`, `protect`, `retireDestroy` and `tryAdvance` only. `barrier`'s drive-to-completion loop and `synchronize`'s spin have never run on real hardware, and both are blocking primitives whose failure mode is a hang rather than a panic. |
 | P4-ITEM-004 | Open | No | | Is one `[[noreturn]]` per-CPU stress the right long-term shape, given vmsmalloc no longer has one? | Replacing rather than selecting was the right call for now (the user's: `VmsmallocStress` was always temporary). But the next subsystem wanting an in-kernel stress faces the same collision, and P4-I5 makes that a structural constraint rather than a convention. |
 | P4-ITEM-005 | Open | No | | Should the driver detect a hang, rather than relying on the shutdown timer to mask one? | A livelocked `barrier` or a stalled grace period currently looks identical to a slow boot: the timer fires, the kernel prints `Goodbye`, and CI sees success. A watchdog comparing per-CPU iteration counts across the run would distinguish them. |
+| P4-ITEM-006 | Open | **Yes, before this phase is a CI gate** | | What is the machine-checkable pass condition? | `cmake --build --target run` exits 0 whether the kernel shuts down cleanly or page-faults to death on every CPU — measured, see Hazards. So the target's exit status carries no information about kernel health, and neither does grepping for "Panic" (release faults do not produce one). The minimum viable check is `Goodbye :)` present AND no `Pagefault`/`Stack trace` line, but that is a convention no build rule currently enforces. |
 
 ## Decisions
 
@@ -85,6 +86,7 @@ Parent ITEM-021 is this phase's charter and should close against it.
 | P4-DEC-001 | Settled | **`RcuStress` replaces `VmsmallocStress` outright** rather than being selectable alongside it. | `VmsmallocStress` was always intended as temporary scaffolding (spec author, 2026-08-01). Replacement avoids inventing a stress-selection mechanism that P4-I5 would then have to police, and the allocator coverage is carried forward by P4-DEC-002 instead of by keeping a second component alive. Decided 2026-08-01. |
 | P4-DEC-002 | Settled | **Three node classes: 64 B and 512 B slab-backed, and 1024 B whole-page (DEC-029 bypass).** | Replacing `VmsmallocStress` would otherwise drop its 8-size-class plus whole-page sweep on the floor. Three classes recover the distinct *paths* (small slab, largest slab, whole-page bypass) at a fraction of the machinery, and RCU still sees one uniform retire/drain protocol. Cross-domain frees need no explicit hand-off: under RCU-DEC-006 stealing the CPU running a deleter is usually not the CPU that allocated the node, so vmsfree's DEC-019 gate is exercised for free. Decided 2026-08-01. |
 | P4-DEC-003 | Settled | **The spike ran before the spec, and the spec records its finding rather than predicting it.** The finding is P1-DEC-018: `onPreTouch` covered reads but not writes. | Spec-first was the house style for Phases 1-3 and it worked; here it would have produced a document asserting that the veneer's freshness discipline was sound, because that is what every existing test showed. The bug was found on the first boot, in the one mechanism ITEM-021 named as most likely wrong, and its diagnosis needed a three-arm in-kernel experiment that no spec could have specified in advance. Recording that inversion is more useful than pretending to the usual order. Decided 2026-08-01. |
+| P4-DEC-005 | Settled | **The stress is run in a DEBUG kernel by default**, and the release configuration is validated separately rather than being the primary target. | Debug is where the detectors live: `CROCOS_RCU_DEBUG_CHECKS=1` makes every veneer and engine assert a named `PANIC`, which is how P1-DEC-018 was attributed in seconds rather than bisected. Release is still worth running — it builds and boots clean, and at ~20x the debug throughput (6.75M iterations/CPU against ~330K) it covers far more volume — but a release failure arrives as an anonymous fault, so it answers "does it survive" and not "what broke". Both configurations are exercised; only debug is diagnostic. Decided 2026-08-01. |
 | P4-DEC-004 | Provisional | **Liveness output is per-CPU counters every 64K iterations**, not per-operation tracing. | Enough to see all CPUs making progress and to spot a stalled one, cheap enough not to distort the workload, and small enough that a 20-second run does not drown the serial log. Provisional because P4-ITEM-005 may want it shaped into a real hang detector. Decided 2026-08-01. |
 
 ## Hazards
@@ -96,10 +98,17 @@ Parent ITEM-021 is this phase's charter and should close against it.
   never as "validated".
 - **The shutdown timer masks hangs** (P4-ITEM-005). A livelock and a healthy run both end in
   `Goodbye :)`.
-- **Debug-only asserts are doing most of the detecting.** P1-DEC-018's defect was caught by an
-  assert that is compiled out in release, where the same defect is a null function-pointer call.
-  A release-build stress would have found nothing and reported success — so this phase's value is
-  concentrated in the debug configuration, and that is worth stating rather than assuming.
+- **Release turns a NAMED panic into an ANONYMOUS fault, and the `run` target's exit code hides
+  both.** Measured 2026-08-01 by reintroducing P1-DEC-018 in a Release build. Debug reports
+  `Panic: Assert failed: rcu: retired node has no deleter` with the file and line — it names the
+  invariant. Release reports `Pagefault at 0x0 accessing 0x0` with a raw stack trace on several
+  CPUs, never reaches the shutdown, and prints no `Goodbye :)`; nothing in that output connects it
+  to RCU, to a deleter, or to a retire. **In BOTH the healthy and the fatal case
+  `cmake --build --target run` exits 0.** So the pass signal is neither the exit status nor the
+  absence of the word "Panic": it is the PRESENCE of `Goodbye :)` together with the absence of a
+  fault line, and any CI wiring must check both explicitly. (An earlier draft of this hazard
+  claimed a release stress "would have found nothing and reported success" — that was wrong, and
+  measuring it is what corrected it. The defect is loud in release; it is merely unattributable.)
 - **The `.icd` glob is configure-time.** Adding or renaming a component without re-running CMake
   configure leaves it silently unregistered — per the Phase-2 failure table, the worst mode
   available, because the kernel boots perfectly and simply does nothing.
@@ -134,8 +143,12 @@ cmake --build cmake-build-debug --target run_numa       # 3 NUMA domains
 cmake --build cmake-build-debug --target run_numa_hmat  # + HMAT latency/bandwidth
 ```
 
-Observed on all three: ~330K iterations per CPU, ~2.5M protected reads and ~350K retires per
-CPU, `corrupt=0`, clean `Goodbye :)`.
+Observed on all three (debug): ~330K iterations per CPU, ~2.5M protected reads and ~350K retires
+per CPU, `corrupt=0`, clean `Goodbye :)`.
+
+Release (`-DCMAKE_BUILD_TYPE=Release`) builds and boots clean at roughly 20x the volume —
+6.75M iterations per CPU, 46.6M protected reads, 6.65M retires — with the debug-check symbols
+absent from the image. Per P4-DEC-005 that is a volume run, not a diagnostic one.
 
 ## References
 
