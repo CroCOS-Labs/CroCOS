@@ -182,8 +182,32 @@ endif()
 add_dependencies(Kernel generate_idt_macros generate_init_registry create_linker_script create_linker_script)
 target_compile_options(Kernel PRIVATE -gdwarf-4)
 target_compile_options(Kernel PRIVATE -ffunction-sections -fdata-sections)
+
+# Link-time optimization, RELEASE ONLY (P4-ITEM-007).
+#
+# `-flto` lived in the LINK options alone, which does nothing: with no LTO IR in
+# the objects there is nothing for the link step to optimize. So the kernel had
+# no cross-TU inlining at all, and every call to a small hot helper in another
+# TU was a real call with prologue and epilogue — measured, not assumed: the
+# P4-DEC-010 probe found `ensureTLBEntryFresh` costing 40 instructions per
+# retire out of 70, ~12 of which are an out-of-line `getCurrentProcessorID()`.
+#
+# THE TRAP THIS AVOIDS: the link line used to read `-flto -Os`. That `-Os` was
+# inert while no object carried LTO IR, but the moment `-flto` appears at COMPILE
+# time the link-time optimization level governs codegen for the whole program —
+# so leaving it would have silently rebuilt all of Release at -Os instead of -O2.
+# The Release link therefore restates -O2 and the inline-unit-growth parameter
+# that CMAKE_CXX_FLAGS_RELEASE sets, since under LTO the entire kernel becomes
+# one unit and the default growth limit is far too tight for it.
+#
+# Debug deliberately stays non-LTO: it is -O0, where LTO buys nothing, costs
+# build time, and degrades the debug info that makes a debug kernel worth having.
+target_compile_options(Kernel PRIVATE $<$<CONFIG:Release>:-flto>)
 target_link_options(Kernel PUBLIC
-        -flto -Os -ffreestanding -mcmodel=kernel -nostdlib
+        $<$<CONFIG:Release>:-flto>
+        $<$<CONFIG:Release>:-O2>
+        $<$<CONFIG:Release>:--param=inline-unit-growth=500>
+        -ffreestanding -mcmodel=kernel -nostdlib
         -T ${GENERATED_LINKER_SCRIPT}
         -Wl,--gc-sections
         #-Wl,--print-gc-sections

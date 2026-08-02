@@ -54,10 +54,18 @@ extern "C" {
 // Stack smashing protection
 // The canary value contains bytes that commonly terminate strings (null, newline, 0xFF)
 // to help detect string-based buffer overflows
+//
+// `used` is REQUIRED under LTO and is not belt-and-braces. -fstack-protector's
+// references to these two are emitted during CODEGEN, which under LTO happens
+// at link time — after the IPA pass that decides what to keep. At IR level
+// nothing refers to either symbol, so LTO discards both and the link then fails
+// with `undefined reference to __stack_chk_guard` from every protected
+// function. Measured, not theorised: that is exactly how the Release build
+// failed when -flto was first added to the compile flags.
 extern "C" {
-    uintptr_t __stack_chk_guard = 0x595e9fbd94fda766;
+    __attribute__((used)) uintptr_t __stack_chk_guard = 0x595e9fbd94fda766;
 
-    [[noreturn]] void __stack_chk_fail(){
+    __attribute__((used)) [[noreturn]] void __stack_chk_fail(){
         PANIC_NO_STACKTRACE("Stack smashing detected!");
     }
 }
