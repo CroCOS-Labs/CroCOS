@@ -70,6 +70,73 @@ namespace {
     Atomic<uint64_t> gStaleHits{0};
 #endif
 
+    // ─── P4-ITEM-002 instruction probe ─────────────────────────────────────
+    //
+    // What is the retire-path cost of P1-DEC-018's per-retire freshness call?
+    // A wall-clock answer is not available here and would be misleading if it
+    // were: the two things that dominate this call on real silicon — a cache
+    // miss on the dirty-bitmap word, and invlpg's serialisation — are precisely
+    // what TCG does not model. So measure INSTRUCTIONS, which the item itself
+    // names as the acceptable alternative.
+    //
+    // Under `-icount shift=0` QEMU derives the TSC from a virtual clock that
+    // advances per guest instruction, so an rdtsc delta is proportional to
+    // instructions retired. The constant of proportionality does not matter:
+    // the headline number is a RATIO of two deltas measured in the same units.
+    //
+    // Two modes, never both, because they would nest: mode 1 brackets the
+    // freshness call inside onPreTouch, mode 2 brackets the whole retire. If
+    // mode 1's probes were live inside a mode-2 measurement they would inflate
+    // the denominator by their own cost and understate the fraction.
+#ifdef CROCOS_INSN_PROBE
+    inline uint64_t insnCounter() noexcept {
+        uint32_t lo, hi;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        return (static_cast<uint64_t>(hi) << 32) | lo;
+    }
+
+    // MINIMA, not means. Interrupts are enabled in the stress loop, so a timer
+    // interrupt landing between the two rdtsc reads inflates that sample by the
+    // whole handler. Measured directly: at `shift=7` the MEAN empty-probe cost
+    // came out 2304 then 2539 ticks and drifted between prints, against a true
+    // cost of 3 instructions — the contamination does not average out, it just
+    // dilutes with sample count. The minimum over hundreds of thousands of
+    // samples is the uncontaminated path, which is the figure the question
+    // actually asks for. Totals and counts are kept alongside so a mean can
+    // still be read, and so the sample size is visible.
+    //
+    // Zero is the "unset" sentinel: these live in .bss and a genuine sample is
+    // never zero, since an rdtsc pair always advances the icount clock.
+    Atomic<uint64_t> gProbeFreshMin{0};
+    Atomic<uint64_t> gProbeFreshTicks{0};
+    Atomic<uint64_t> gProbeFreshCount{0};
+    Atomic<uint64_t> gProbeStaleMin{0};
+    Atomic<uint64_t> gProbeStaleTicks{0};
+    Atomic<uint64_t> gProbeStaleCount{0};
+    Atomic<uint64_t> gProbeRetireMin{0};
+    Atomic<uint64_t> gProbeRetireTicks{0};
+    Atomic<uint64_t> gProbeRetireCount{0};
+    // An empty back-to-back rdtsc pair, so every figure can be stated net of the
+    // probe itself rather than including it.
+    Atomic<uint64_t> gProbeBaseMin{0};
+    Atomic<uint64_t> gProbeBaseTicks{0};
+    Atomic<uint64_t> gProbeBaseCount{0};
+
+    void recordMin(Atomic<uint64_t>& slot, uint64_t sample) noexcept {
+        uint64_t cur = slot.load(RELAXED);
+        while ((cur == 0 || sample < cur) &&
+               !slot.compare_exchange_weak(cur, sample, RELAXED, RELAXED)) {}
+    }
+
+    void calibrateProbe() noexcept {
+        const uint64_t c0 = insnCounter();
+        const uint64_t c1 = insnCounter();
+        recordMin(gProbeBaseMin, c1 - c0);
+        gProbeBaseTicks.fetch_add(c1 - c0, RELAXED);
+        gProbeBaseCount.fetch_add(1, RELAXED);
+    }
+#endif
+
     struct KernelRcuHooks {
         void onAfterEpochLoad(uint64_t) const noexcept {}       // WINDOW-INTERIOR
         void onAfterActivation(uint64_t) const noexcept {}      // WINDOW-INTERIOR
@@ -82,6 +149,25 @@ namespace {
         void onAfterClaim(size_t, size_t) const noexcept {}
 
         void onPreTouch(Core::rcu::RetireHead* n) const noexcept {
+#if defined(CROCOS_INSN_PROBE) && CROCOS_INSN_PROBE == 1
+            // P4-ITEM-002 mode 1: the freshness call alone, bracketed as tightly
+            // as possible. Nothing else is in the bracket, so the delta is the
+            // call plus one rdtsc, and gProbeBase carries the latter away.
+            calibrateProbe();
+            const uint64_t t0 = insnCounter();
+            const bool stale = mm::VMSubstrate::ensureTLBEntryFresh(n);
+            const uint64_t t1 = insnCounter();
+            if (stale) {
+                recordMin(gProbeStaleMin, t1 - t0);
+                gProbeStaleTicks.fetch_add(t1 - t0, RELAXED);
+                gProbeStaleCount.fetch_add(1, RELAXED);
+            } else {
+                recordMin(gProbeFreshMin, t1 - t0);
+                gProbeFreshTicks.fetch_add(t1 - t0, RELAXED);
+                gProbeFreshCount.fetch_add(1, RELAXED);
+            }
+            return;
+#endif
 #ifdef CROCOS_FRESHNESS_STATS
             // P4-DEC-006. Relaxed: diagnostics, not protocol. This hook is NOT
             // hot (once per retire, once per drained node), unlike
@@ -367,6 +453,15 @@ FreshnessStats freshnessStats() noexcept {
 }
 #endif
 
+#ifdef CROCOS_INSN_PROBE
+InsnProbeStats insnProbeStats() noexcept {
+    return { gProbeFreshMin.load(RELAXED),  gProbeFreshCount.load(RELAXED),
+             gProbeStaleMin.load(RELAXED),  gProbeStaleCount.load(RELAXED),
+             gProbeRetireMin.load(RELAXED), gProbeRetireCount.load(RELAXED),
+             gProbeBaseMin.load(RELAXED),   gProbeBaseCount.load(RELAXED) };
+}
+#endif
+
 // ─── detail bridges ────────────────────────────────────────────────────────
 
 namespace detail {
@@ -399,7 +494,20 @@ void retireNode(Domain& d, Core::rcu::RetireHead* node,
     // The section / drain / teardown precondition (RCU-DEC-038) is asserted by
     // the engine, which is the only layer that can see slot.inDrain and
     // teardownActive. Not duplicated here.
+#if defined(CROCOS_INSN_PROBE) && CROCOS_INSN_PROBE == 2
+    // P4-ITEM-002 mode 2: the WHOLE retire, freshness call included, so the
+    // mode-1 figure can be stated as a fraction of it. onPreTouch's own probes
+    // are compiled out in this mode — see the note at the probe definition.
+    calibrateProbe();
+    const uint64_t t0 = insnCounter();
     Access::engine(d).retire(kernel::getLogicalProcessorID(), node, deleter);
+    const uint64_t t1 = insnCounter();
+    recordMin(gProbeRetireMin, t1 - t0);
+    gProbeRetireTicks.fetch_add(t1 - t0, RELAXED);
+    gProbeRetireCount.fetch_add(1, RELAXED);
+#else
+    Access::engine(d).retire(kernel::getLogicalProcessorID(), node, deleter);
+#endif
 }
 
 }   // namespace detail

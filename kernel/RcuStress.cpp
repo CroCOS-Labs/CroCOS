@@ -201,6 +201,18 @@ namespace rcu_stress {
     constexpr uint64_t kWatchdogPeriodMs = 2000;
     constexpr uint32_t kStallSamples     = 4;
 
+#ifdef CROCOS_INSN_PROBE
+    // Returns a klog-able suffix. Means are integer-truncated; with hundreds of
+    // thousands of samples that is far below the noise the ratio carries.
+    struct InsnProbeLine {
+        uint64_t fresh, stale, retire, base;
+    };
+    InsnProbeLine insnProbeLine() {
+        const auto s = rcu::insnProbeStats();
+        return { s.freshTicks, s.staleTicks, s.retireTicks, s.baseTicks };
+    }
+#endif
+
     void watchdogTick();
 
     void reportHangAndExit(size_t stalled, size_t cpus) {
@@ -433,6 +445,15 @@ namespace rcu_stress {
                    << " stale=" << rcu::freshnessStats().staleHits
 #else
                    << " [stats=off]"
+#endif
+#ifdef CROCOS_INSN_PROBE
+                   // P4-ITEM-002. Ticks are -icount virtual-clock ticks; only
+                   // the RATIO between modes 1 and 2 is meaningful, and `base`
+                   // is the empty-probe cost each figure should be net of.
+                   << " probeBase=" << st::insnProbeLine().base
+                   << " freshTicks=" << st::insnProbeLine().fresh
+                   << " staleTicks=" << st::insnProbeLine().stale
+                   << " retireTicks=" << st::insnProbeLine().retire
 #endif
                    << "\n";
         }

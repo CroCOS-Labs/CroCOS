@@ -388,6 +388,26 @@ namespace kernel::rcu {
     FreshnessStats freshnessStats() noexcept;
 #endif
 
+    // P4-ITEM-002. Ticks are `-icount shift=0` virtual-clock ticks, which are
+    // proportional to guest instructions retired; the constant of
+    // proportionality is irrelevant because the answer is a ratio. `base` is an
+    // empty back-to-back rdtsc pair, so every figure can be stated net of the
+    // probe. Mode 1 fills fresh/stale, mode 2 fills retire — never both, since
+    // nesting them would inflate the denominator. See the note in RCU.cpp.
+#ifdef CROCOS_INSN_PROBE
+    // The tick fields are MINIMA over all samples, not means: interrupts are
+    // enabled on the measured paths and a timer landing inside the bracket
+    // inflates that sample by the whole handler, which dilutes with sample count
+    // rather than averaging out. Counts are the sample sizes.
+    struct InsnProbeStats {
+        uint64_t freshTicks,  freshCount;
+        uint64_t staleTicks,  staleCount;
+        uint64_t retireTicks, retireCount;
+        uint64_t baseTicks,   baseCount;
+    };
+    InsnProbeStats insnProbeStats() noexcept;
+#endif
+
     // The .icd routine (P2-DEC-004): memory_management phase, after
     // VMSubstrateSlab. Global, not per-CPU — which makes it an implicit all-CPU
     // barrier, so slots exist before any AP can enter a section.

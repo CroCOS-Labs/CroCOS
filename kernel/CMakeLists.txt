@@ -165,9 +165,19 @@ add_custom_target(generate_idt_macros
 # Verification Targets, which is the opposite of the truth.
 option(CROCOS_FRESHNESS_STATS "Count RCU freshness hits and slab-page reclaims (P4-DEC-006)" OFF)
 
+# P4-ITEM-002: instruction cost of the per-retire freshness call. OFF, and only
+# meaningful under `-icount shift=0`, which ties the guest TSC to instructions
+# retired. 1 = bracket the freshness call inside onPreTouch; 2 = bracket the
+# whole retire so 1 can be stated as a fraction of it. Never both: nesting them
+# would inflate the denominator by the inner probe's own cost.
+set(CROCOS_INSN_PROBE "" CACHE STRING "RCU retire-path instruction probe: unset, 1 (freshness call) or 2 (whole retire)")
+
 add_executable(Kernel ${KERNEL_SRC} ${GENERATED_INIT_CPP})
 if(CROCOS_FRESHNESS_STATS)
     target_compile_definitions(Kernel PRIVATE CROCOS_FRESHNESS_STATS)
+endif()
+if(CROCOS_INSN_PROBE)
+    target_compile_definitions(Kernel PRIVATE CROCOS_INSN_PROBE=${CROCOS_INSN_PROBE})
 endif()
 add_dependencies(Kernel generate_idt_macros generate_init_registry create_linker_script create_linker_script)
 target_compile_options(Kernel PRIVATE -gdwarf-4)
