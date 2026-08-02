@@ -366,6 +366,28 @@ namespace kernel::rcu {
     // the phase's failure table calls the worst one.
     extern Domain kernelDomain;
 
+    // ─── P4-ITEM-001 instrumentation ───────────────────────────────────────
+    //
+    // Whether this framework's freshness discipline is merely RUNNING or is
+    // actually SAVING us. onPreTouch fires once per retire and once per drained
+    // node; `staleHits` counts the subset where ensureTLBEntryFresh really had
+    // to invalidate, i.e. where the node's page had been remapped under this CPU
+    // since it last touched it. A stress that reports staleHits == 0 has not
+    // exercised the DEC-047 hazard at all, however healthy it looks — which is
+    // exactly the question P4-ITEM-001 asks and the reason this is counted at
+    // the hook rather than inside ensureTLBEntryFresh (that one is on every
+    // SafePtr dereference and is genuinely hot; this one is not).
+    // Declared only under CROCOS_FRESHNESS_STATS, deliberately: a build without
+    // it must not be able to report staleHits == 0, which this phase's
+    // Verification Targets read as a coverage regression.
+#ifdef CROCOS_FRESHNESS_STATS
+    struct FreshnessStats {
+        uint64_t preTouches;   // onPreTouch invocations
+        uint64_t staleHits;    // ...of which actually invalidated
+    };
+    FreshnessStats freshnessStats() noexcept;
+#endif
+
     // The .icd routine (P2-DEC-004): memory_management phase, after
     // VMSubstrateSlab. Global, not per-CPU — which makes it an implicit all-CPU
     // barrier, so slots exist before any AP can enter a section.

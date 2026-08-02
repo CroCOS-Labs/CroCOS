@@ -221,6 +221,11 @@ namespace rcu_stress {
         if ((r >> 40) % 64 == 0) (void)rcu::tryAdvance(rcu::kernelDomain);
 
         if ((iteration & st::kLivenessMask) == 0) {
+            // P4-ITEM-001: `reclaims` and `stale` are the coverage claim, not
+            // decoration. reclaims == 0 means the DEC-047 reclaim path never
+            // ran; stale == 0 means no RCU node was ever touched through a
+            // remapped mapping, so the hazard onPreTouch guards was never
+            // actually presented to it — however healthy everything else looks.
             klog() << "rcuStress: cpu=" << static_cast<uint64_t>(myCpu)
                    << " iter=" << iteration
                    << " reads=" << st::gReads.load(RELAXED)
@@ -228,6 +233,13 @@ namespace rcu_stress {
                    << " retires=" << st::gRetires.load(RELAXED)
                    << " nullReads=" << st::gNullReads.load(RELAXED)
                    << " corrupt=" << st::gCorrupt.load(RELAXED)
+#ifdef CROCOS_FRESHNESS_STATS
+                   << " reclaims=" << mm::VMSubstrate::reclaimedSlabPageCount()
+                   << " preTouch=" << rcu::freshnessStats().preTouches
+                   << " stale=" << rcu::freshnessStats().staleHits
+#else
+                   << " [stats=off]"
+#endif
                    << "\n";
         }
         ++iteration;

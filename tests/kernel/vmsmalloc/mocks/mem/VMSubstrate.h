@@ -43,7 +43,7 @@ namespace kernel::mm::VMSubstrate {
 
     // No-op in userspace: no TLB, no dirty bitmap. The call site in
     // vmsmalloc.cpp is still exercised (source-order correctness).
-    inline void ensureTLBEntryFresh(void*) noexcept {}
+    inline bool ensureTLBEntryFresh(void*) noexcept { return false; }  // userspace: never stale
 
     // Phase-3 storage primitives.
     void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);

@@ -154,7 +154,20 @@ add_custom_target(generate_idt_macros
     DEPENDS ${CMAKE_BINARY_DIR}/generated_headers/isr.inc, ${CMAKE_BINARY_DIR}/generated_headers/isr_set.inc
 )
 
+# P4-DEC-006 coverage instrumentation. OFF by default: these counters answer
+# "is the DEC-047 hazard actually being presented to onPreTouch", which is a
+# question you ask of a stress run, not something a shipping kernel should pay
+# for on its retire and reclaim paths.
+#
+# Deliberately makes the stats fields ABSENT rather than zero when off — a build
+# that printed "stale=0" would read as a coverage regression under this phase's
+# Verification Targets, which is the opposite of the truth.
+option(CROCOS_FRESHNESS_STATS "Count RCU freshness hits and slab-page reclaims (P4-DEC-006)" OFF)
+
 add_executable(Kernel ${KERNEL_SRC} ${GENERATED_INIT_CPP})
+if(CROCOS_FRESHNESS_STATS)
+    target_compile_definitions(Kernel PRIVATE CROCOS_FRESHNESS_STATS)
+endif()
 add_dependencies(Kernel generate_idt_macros generate_init_registry create_linker_script create_linker_script)
 target_compile_options(Kernel PRIVATE -gdwarf-4)
 target_compile_options(Kernel PRIVATE -ffunction-sections -fdata-sections)

@@ -854,7 +854,15 @@ namespace kernel::mm::VMSubstrate {
     // concurrent ChainedTreiberStack::pop mid-flight on the reclaimed descriptor
     // does not #PF on its speculative pre-CAS read. The real phys frame is still
     // returned to the allocator and the VA is still released to the radix tree.
+#ifdef CROCOS_FRESHNESS_STATS
+    namespace { Atomic<uint64_t> gReclaimedSlabPages{0}; }
+    uint64_t reclaimedSlabPageCount() { return gReclaimedSlabPages.load(RELAXED); }
+#endif
+
     void reclaimSlabPage(void* ptr) {
+#ifdef CROCOS_FRESHNESS_STATS
+        gReclaimedSlabPages.fetch_add(1, RELAXED);   // P4-DEC-006
+#endif
         releaseLeafMapping(ptr, /*sentinelRemap=*/true);
     }
 
@@ -1014,7 +1022,7 @@ namespace kernel::mm::VMSubstrate {
         return reinterpret_cast<void*>(origVA.value);
     }
 
-    void ensureTLBEntryFresh(void* ptr) {
+    bool ensureTLBEntryFresh(void* ptr) {
         const auto ptrAddr = reinterpret_cast<uint64_t>(ptr);
         const auto tableBase = roundDownToNearestMultiple(ptrAddr, arch::bigPageSize);
         const size_t k_abs = (ptrAddr - tableBase) / arch::smallPageSize;
@@ -1027,7 +1035,9 @@ namespace kernel::mm::VMSubstrate {
         if (dirtyEntry.load(ACQUIRE) & bit) {
             arch::invlpg(virt_addr{ptrAddr});
             dirtyEntry.fetch_and(~bit, RELAXED);
+            return true;
         }
+        return false;
     }
 
     bool init() {

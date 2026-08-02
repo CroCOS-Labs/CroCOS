@@ -65,6 +65,11 @@ namespace {
     // (a counter in vmsmalloc memory, a log line, MMIO) would break the audited
     // no-instruction-can-fault claim exactly as the evicted monoTimens stall
     // stamp did, and a spinning point would spin with interrupts masked.
+#ifdef CROCOS_FRESHNESS_STATS
+    Atomic<uint64_t> gPreTouches{0};
+    Atomic<uint64_t> gStaleHits{0};
+#endif
+
     struct KernelRcuHooks {
         void onAfterEpochLoad(uint64_t) const noexcept {}       // WINDOW-INTERIOR
         void onAfterActivation(uint64_t) const noexcept {}      // WINDOW-INTERIOR
@@ -77,7 +82,19 @@ namespace {
         void onAfterClaim(size_t, size_t) const noexcept {}
 
         void onPreTouch(Core::rcu::RetireHead* n) const noexcept {
-            mm::VMSubstrate::ensureTLBEntryFresh(n);
+#ifdef CROCOS_FRESHNESS_STATS
+            // P4-DEC-006. Relaxed: diagnostics, not protocol. This hook is NOT
+            // hot (once per retire, once per drained node), unlike
+            // ensureTLBEntryFresh itself, which is on every SafePtr dereference
+            // and is why the counting lives here and not there.
+            const bool wasStale = mm::VMSubstrate::ensureTLBEntryFresh(n);
+            gPreTouches.fetch_add(1, RELAXED);
+            if (wasStale) gStaleHits.fetch_add(1, RELAXED);
+#else
+            // The bool return is free either way: the branch already exists
+            // inside ensureTLBEntryFresh, so reporting it costs a register.
+            (void)mm::VMSubstrate::ensureTLBEntryFresh(n);
+#endif
         }
     };
 
@@ -343,6 +360,12 @@ ReadGuard::~ReadGuard() CROCOS_RCU_DTOR_NOEXCEPT {
     }
 #endif
 }
+
+#ifdef CROCOS_FRESHNESS_STATS
+FreshnessStats freshnessStats() noexcept {
+    return { gPreTouches.load(RELAXED), gStaleHits.load(RELAXED) };
+}
+#endif
 
 // ─── detail bridges ────────────────────────────────────────────────────────
 

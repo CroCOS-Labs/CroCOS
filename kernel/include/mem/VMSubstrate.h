@@ -44,7 +44,19 @@ namespace kernel::mm::VMSubstrate {
     // nodes). The userspace mock recycles like freePage (no page tables).
     void reclaimSlabPage(void*);
 
-    void ensureTLBEntryFresh(void*);
+    // Returns whether it actually had to invalidate — i.e. whether this CPU's
+    // mapping for that page WAS stale. Callers may ignore it; SafePtr does.
+    // It exists so an instrumented consumer can distinguish "the freshness call
+    // ran" from "the freshness call saved us", which is the difference between
+    // exercising the DEC-047 hazard and merely walking past it (P4-ITEM-001).
+    bool ensureTLBEntryFresh(void*);
+
+#ifdef CROCOS_FRESHNESS_STATS
+    // Count of reclaimSlabPage calls since boot (P4-DEC-006). Declared only
+    // under the flag so a stats-less build cannot silently report 0 and be
+    // misread as "the reclaim path never ran".
+    uint64_t reclaimedSlabPageCount();
+#endif
 
     // Convention-internal: external callers should prefer make<T> / destroy<T>.
     // These are unavoidably declared here because make<T> / destroy<T> are
