@@ -20,6 +20,7 @@ namespace kernel {
         Panic = 1,              // kernel::panic — a failed assert or an explicit PANIC
         PageFault = 2,          // an unhandled page fault
         UnhandledException = 3, // any other exception reaching the default handler
+        Hang = 4,               // a watchdog observed a CPU making no forward progress
     };
 
     // Terminate the machine, reporting `status` to the host. Never returns.

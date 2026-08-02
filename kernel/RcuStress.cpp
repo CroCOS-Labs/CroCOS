@@ -49,11 +49,13 @@
 #include <kernel.h>
 #include <arch.h>
 #include <kassert.h>
+#include <kexit.h>
 #include <CpuLocal.h>
 #include <mem/VMSubstrate.h>
 #include <mem/NUMA.h>
 #include <core/atomic.h>
 #include <rcu/RCU.h>
+#include <timing/timing.h>
 
 namespace VMS  = kernel::mm::VMSubstrate;
 namespace slab = kernel::mm::vmsmalloc;
@@ -111,6 +113,90 @@ namespace rcu_stress {
     Atomic<uint64_t> gRetires{0};
     Atomic<uint64_t> gCorrupt{0};
     Atomic<uint64_t> gNullReads{0};
+
+    // ── Hang watchdog (P4-ITEM-005) ────────────────────────────────────────
+    //
+    // The shutdown timer masks hangs: a livelocked barrier, a stalled grace
+    // period and a healthy run all end the same way — the timer fires, the
+    // kernel prints `Goodbye :)`, and (before P4-DEC-007) exits 0. Even with a
+    // failure exit path a stalled CPU is not a *fault*, so nothing writes a
+    // failure status and the run still reports success. Something has to
+    // actively notice the absence of progress.
+    //
+    // Each CPU publishes its iteration count to a padded slot; a periodic timer
+    // event samples every slot and fails the run if any CPU's count is frozen
+    // across kStallSamples consecutive samples.
+    //
+    // The beat is `iteration + 1`, so a slot reading 0 means "this CPU never
+    // entered the stress loop at all" — a distinct failure that is otherwise
+    // completely invisible, since a missing per-CPU liveness line is not
+    // something any automated check looks for.
+    struct alignas(arch::CACHE_LINE_SIZE) Heartbeat {
+        Atomic<uint64_t> beat{0};
+    };
+    Heartbeat gHeartbeat[kMaxCpus];
+
+    // Watchdog-private; touched only from the timer callback, which is not
+    // reentrant with itself (it re-enqueues only after it finishes). Plain.
+    uint64_t gPrevBeat[kMaxCpus];
+    uint32_t gStallSamples[kMaxCpus];
+
+    // First sample is late enough that a slow-starting AP is not mistaken for a
+    // dead one; a healthy CPU turns over ~16K iterations per second, so four
+    // consecutive samples of EXACTLY zero progress (6-8 s) is a very wide margin
+    // against QEMU/TCG vCPU starvation on an oversubscribed host. Detection
+    // lands around 11 s, comfortably inside the 20 s shutdown.
+    constexpr uint64_t kWatchdogFirstMs  = 3000;
+    constexpr uint64_t kWatchdogPeriodMs = 2000;
+    constexpr uint32_t kStallSamples     = 4;
+
+    void watchdogTick();
+
+    void reportHangAndExit(size_t stalled, size_t cpus) {
+        klog() << "\nrcuStress: WATCHDOG — cpu=" << static_cast<uint64_t>(stalled)
+               << " made no progress across " << static_cast<uint64_t>(kStallSamples)
+               << " samples (" << (kStallSamples * kWatchdogPeriodMs) << " ms)\n";
+        if (gPrevBeat[stalled] == 0) {
+            klog() << "  cpu=" << static_cast<uint64_t>(stalled)
+                   << " NEVER ENTERED the stress loop\n";
+        } else {
+            klog() << "  cpu=" << static_cast<uint64_t>(stalled)
+                   << " stalled at iteration " << (gPrevBeat[stalled] - 1) << "\n";
+        }
+
+        // All CPUs, so "one CPU wedged" is distinguishable from "everything
+        // stopped" — a very different diagnosis, and the log is the only place
+        // that distinction survives.
+        for (size_t i = 0; i < cpus && i < kMaxCpus; ++i) {
+            const uint64_t b = gHeartbeat[i].beat.load(RELAXED);
+            klog() << "  cpu=" << static_cast<uint64_t>(i) << " iter=";
+            if (b == 0) klog() << "(never started)\n"; else klog() << (b - 1) << "\n";
+        }
+
+        // Deliberately NO stack trace. This runs in the timer interrupt on
+        // whichever CPU the watchdog event landed on, which is by definition NOT
+        // the stalled one — a trace here would describe the healthy CPU and read
+        // as though it were the culprit. Getting the stalled CPU's trace needs an
+        // async fire-and-forget IPI asking it to self-report, which is a natural
+        // second consumer for the IPI subsystem once that exists.
+        exitToHost(ExitStatus::Hang);
+    }
+
+    void watchdogTick() {
+        const size_t cpus = arch::processorCount();
+        for (size_t i = 0; i < cpus && i < kMaxCpus; ++i) {
+            const uint64_t cur = gHeartbeat[i].beat.load(RELAXED);
+            if (cur != gPrevBeat[i]) {
+                gPrevBeat[i] = cur;
+                gStallSamples[i] = 0;
+                continue;
+            }
+            if (++gStallSamples[i] >= kStallSamples) {
+                reportHangAndExit(i, cpus);
+            }
+        }
+        timing::enqueueEvent([] { watchdogTick(); }, kWatchdogPeriodMs);
+    }
 
     [[nodiscard]] constexpr uint64_t checksumOf(uint64_t version, uint32_t cpu, uint32_t cls) {
         return kMagic ^ (version * 0x9E3779B97F4A7C15ull) ^ (uint64_t{cpu} << 32) ^ cls;
@@ -182,6 +268,19 @@ namespace rcu_stress {
 
     klog() << "rcuStress: starting on CPU " << static_cast<uint64_t>(myCpu) << "\n";
 
+    // One CPU arms the hang watchdog (P4-ITEM-005). CPU 0 by construction: it is
+    // the BSP, so it is running by the time any AP could stall, and picking a
+    // fixed CPU keeps this a single event rather than one per CPU.
+    //
+    // Known blind spot, stated rather than engineered around: the event is
+    // delivered as a timer interrupt, so a CPU wedged with interrupts MASKED —
+    // inside RCU-DEC-024's window, say — cannot service it. If that CPU is the
+    // one holding the watchdog event, the watchdog dies with it and the run
+    // reverts to the old behaviour: `Goodbye :)` and exit 0.
+    if (myCpu == 0) {
+        timing::enqueueEvent([] { st::watchdogTick(); }, st::kWatchdogFirstMs);
+    }
+
     // Cheap per-CPU PRNG; distinct seed per CPU so the CPUs do not march in
     // lockstep over the same cells.
     uint64_t rng = 0x9E3779B97F4A7C15ull ^ (uint64_t{myCpu} * 0xBF58476D1CE4E5B9ull);
@@ -219,6 +318,11 @@ namespace rcu_stress {
         // advancement from its own path, which is also what makes it steal other
         // CPUs' expired bags.
         if ((r >> 40) % 64 == 0) (void)rcu::tryAdvance(rcu::kernelDomain);
+
+        // The watchdog's only input. Relaxed and uncontended — a private,
+        // cache-line-padded slot — so it costs one store per iteration and
+        // cannot perturb the workload it is measuring (P4-DEC-004's concern).
+        st::gHeartbeat[myCpu].beat.store(iteration + 1, RELAXED);
 
         if ((iteration & st::kLivenessMask) == 0) {
             // P4-ITEM-001: `reclaims` and `stale` are the coverage claim, not

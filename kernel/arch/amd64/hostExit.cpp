@@ -18,7 +18,8 @@ namespace kernel {
         //     -device isa-debug-exit,iobase=0xf4,iosize=0x04
         // A write of v makes QEMU exit with status (v << 1) | 1 — always odd, so
         // always nonzero, so never confusable with a clean shutdown. Failure
-        // statuses map to 3 (Panic), 5 (PageFault) and 7 (UnhandledException).
+        // statuses map to 3 (Panic), 5 (PageFault), 7 (UnhandledException) and
+        // 9 (Hang).
         //
         // The device is deliberately absent from the qmon/kdebug targets: those
         // are gdb stubs, where halting on a fault so it can be inspected beats
