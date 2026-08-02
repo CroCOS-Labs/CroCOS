@@ -75,7 +75,7 @@ set(KERNEL_SRC
         mm/VMSubstrate.cpp
         mm/VMSubstrateSlab.cpp
         mm/vmsmalloc.cpp
-        VmsmallocStress.cpp
+        RcuStress.cpp
         rcu/RCU.cpp
         CpuLocal.cpp
         arch/amd64/CpuLocalBase.cpp
@@ -92,7 +92,7 @@ set_source_files_properties(
         mm/VMSubstrate.cpp
         mm/VMSubstrateSlab.cpp
         mm/vmsmalloc.cpp
-        VmsmallocStress.cpp
+        RcuStress.cpp
         PROPERTIES COMPILE_FLAGS "-O2 -ftemplate-backtrace-limit=0"
 )
 

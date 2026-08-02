@@ -89,11 +89,29 @@ phase = "smp_bringup"
 depends_on = ["SMP"]
 routine = "kernel::enqueueShutdown"
 
-[VmsmallocStress]
+[RcuStress]
 
-name = "Vmsmalloc Stress Test"
+# RCU Phase 4. Takes VmsmallocStress's slot: that component was always meant to
+# be temporary, and this one subsumes its allocator coverage (three node classes
+# spanning a mid slab class, the largest slab class, and a DEC-029 whole-page
+# allocation) while adding the RCU mechanisms parent-spec ITEM-021 says have
+# never executed on a real target.
+#
+# per_cpu = true so every CPU drives its own readers and writers — cross-CPU
+# stealing (RCU-DEC-006) is the hazard under test, and a single-CPU stress would
+# never produce it.
+#
+# depends_on is resolved WITHIN a phase (tools/gen_init_registry.py's
+# compute_component_order runs per phase), so naming a component from another
+# phase leaves a permanent in-edge and is reported as "Component X is in
+# dependency cycle" — a misleading message for what is really an unresolvable
+# name. So only Shutdown, a smp_bringup peer, appears here. RCU is guaranteed by
+# phase ordering (memory_management < smp_bringup), and the driver asserts
+# kernelDomain.initialized() on entry rather than relying on that silently.
+
+name = "RCU Stress Test"
 required = true
 per_cpu = true
 phase = "smp_bringup"
 depends_on = ["Shutdown"]
-routine = "kernel::vmsmallocStress"
+routine = "kernel::rcuStress"
