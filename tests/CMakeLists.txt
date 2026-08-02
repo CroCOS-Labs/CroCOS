@@ -65,16 +65,25 @@ add_subdirectory(liballoc)
 add_subdirectory(core)
 
 # Add a custom target to run all tests (core + kernel)
+# Every ASan runner is paired with its TSan sibling, so `run_all_tests` genuinely
+# means all tests. The two Core/LibAlloc TSan runners were omitted for a long
+# time; CoreTestRunnerTSan in particular is the ONLY thing covering
+# Core::rcu::EpochDomain's concurrency tests under the ARMv8 release gate, so its
+# absence meant the RCU engine's weak-memory coverage was opt-in.
 add_custom_target(run_all_tests
     USES_TERMINAL
     COMMAND core/CoreTestRunner
+    COMMAND core/CoreTestRunnerTSan
     COMMAND kernel/KernelTestRunner
     COMMAND liballoc/LibAllocTestRunner
+    COMMAND liballoc/LibAllocTestRunnerTSan
     COMMAND kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunner
     COMMAND kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunnerTSan
     COMMAND kernel/rcu/KernelRcuIntegrationTestRunner
     COMMAND kernel/rcu/KernelRcuIntegrationTestRunnerTSan
-    DEPENDS core/CoreTestRunner liballoc/LibAllocTestRunner kernel/KernelTestRunner
+    DEPENDS core/CoreTestRunner core/CoreTestRunnerTSan
+            liballoc/LibAllocTestRunner liballoc/LibAllocTestRunnerTSan
+            kernel/KernelTestRunner
             kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunner
             kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunnerTSan
             kernel/rcu/KernelRcuIntegrationTestRunner
