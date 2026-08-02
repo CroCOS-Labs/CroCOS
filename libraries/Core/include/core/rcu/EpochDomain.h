@@ -790,31 +790,38 @@ namespace Core::rcu {
             for (;;) {
                 bool didWork = false;
                 for (size_t i = 0; i < slotCount; ++i) {
+                    ReaderSlot& s = slots[i];
+
+                    // THE OWNER'S OPEN BAG GOES LAST, AND THE CURSOR MOVES OFF IT
+                    // FIRST. Not tidiness — without it a deleter-retire during
+                    // this drain is fatal, and RCU-DEC-038 makes such retires
+                    // explicitly legal.
+                    //
+                    // The failure it prevents: under teardown the drainer has no
+                    // bound slot, so every deleter-retire lands in the DRAINER's
+                    // slot. If we hold that slot's openBagIndex bag Claimed,
+                    // prepareOpenBag reads its own open bag, finds Claimed, and
+                    // trips its Free-or-Open assert. Found by the Phase 3 torture
+                    // suite (contended-teardown scenario).
+                    //
+                    // openBagIndex is re-read every iteration because a deleter
+                    // may rotate the cursor under us; a bag it seals after we have
+                    // passed its index is collected by the next outer pass.
                     for (size_t b = 0; b < kBagCount; ++b) {
-                        Atomic<uint64_t>& ts = slots[i].bagTagState[b];
-                        uint64_t v = ts.load(kBagDrainAccess);       // RELAXED — no concurrency
-                        BagState st = bagStateOf(v);
-                        if (st == BagState::Free) continue;
-                        assert(st != BagState::Claimed,
-                               "rcu: bag became Claimed during a teardown drain");
-
-                        const uint64_t tag = bagTagOf(v);
-                        if (st == BagState::Open) {
-                            ts.store(packBag(tag, BagState::Sealed), kBagDrainAccess);
-                        }
-                        // Universal owner: claim without a CAS. Legal only because
-                        // the precondition removed all concurrency.
-                        ts.store(packBag(tag, BagState::Claimed), kBagDrainAccess);
-
-                        size_t budget = kUnboundedDrainBatch;       // exempt from RCU-DEC-033
-                        const size_t here = drainClaimedBag(slots[i], b, budget);
-                        ran += here;
-                        didWork = didWork || here > 0;
-
-                        assert(slots[i].bagHead[b].load(kBagDrainAccess) == nullptr,
-                               "rcu: teardown drain left a bag non-empty");
-                        ts.store(packBag(tag, BagState::Free), kBagDrainAccess);
+                        if (b == s.openBagIndex) continue;
+                        didWork = drainBagAsUniversalOwner(s, b, ran) || didWork;
                     }
+
+                    const size_t openIdx = s.openBagIndex;
+                    // A Free bag always exists by now: the loop above left every
+                    // other bag Free, and at most ONE can have been re-sealed since
+                    // — the epoch cannot advance during teardown (tryAdvance
+                    // early-outs on teardownActive), so prepareOpenBag's `t < e`
+                    // rotation trigger fires at most once per slot per pass. With
+                    // kBagCount >= 2 static-asserted, that leaves at least one.
+                    const size_t j = findFreeBagExcept(s, openIdx);
+                    if (j != kNoBag) s.openBagIndex = j;
+                    didWork = drainBagAsUniversalOwner(s, openIdx, ran) || didWork;
                 }
                 // Deleters may have retired into bags already visited this pass —
                 // legal, and collected by the next one. Terminates because with no
@@ -898,6 +905,47 @@ namespace Core::rcu {
                 if (bagStateOf(s.bagTagState[b].load(kBagTagLoad)) == BagState::Free) return b;
             }
             return kNoBag;
+        }
+
+        // As above, skipping one index. drainAllQuiescent needs a Free bag that is
+        // NOT the one it is about to claim, so that the owner's cursor can be moved
+        // somewhere a deleter-retire can safely land.
+        [[nodiscard]] static size_t findFreeBagExcept(ReaderSlot& s,
+                                                      size_t except) CROCOS_RCU_NOEXCEPT {
+            for (size_t b = 0; b < kBagCount; ++b) {
+                if (b == except) continue;
+                if (bagStateOf(s.bagTagState[b].load(kBagTagLoad)) == BagState::Free) return b;
+            }
+            return kNoBag;
+        }
+
+        // One bag, drained as UNIVERSAL OWNER — the plain-op form legal only under
+        // drainAllQuiescent's precondition. Returns whether any deleter ran.
+        bool drainBagAsUniversalOwner(ReaderSlot& s, size_t b,
+                                      size_t& ran) CROCOS_RCU_NOEXCEPT {
+            Atomic<uint64_t>& ts = s.bagTagState[b];
+            const uint64_t v = ts.load(kBagDrainAccess);            // RELAXED — no concurrency
+            const BagState st = bagStateOf(v);
+            if (st == BagState::Free) return false;
+            assert(st != BagState::Claimed,
+                   "rcu: bag became Claimed during a teardown drain");
+
+            const uint64_t tag = bagTagOf(v);
+            if (st == BagState::Open) {
+                ts.store(packBag(tag, BagState::Sealed), kBagDrainAccess);
+            }
+            // Universal owner: claim without a CAS. Legal only because the
+            // precondition removed all concurrency.
+            ts.store(packBag(tag, BagState::Claimed), kBagDrainAccess);
+
+            size_t budget = kUnboundedDrainBatch;                   // exempt from RCU-DEC-033
+            const size_t here = drainClaimedBag(s, b, budget);
+            ran += here;
+
+            assert(s.bagHead[b].load(kBagDrainAccess) == nullptr,
+                   "rcu: teardown drain left a bag non-empty");
+            ts.store(packBag(tag, BagState::Free), kBagDrainAccess);
+            return here > 0;
         }
 
         // ─── prepareOpenBag — bag selection and rotation ─────────────────────
