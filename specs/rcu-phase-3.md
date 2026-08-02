@@ -1,6 +1,6 @@
 ---
 kind: leaf
-status: ready
+status: complete
 parent: specs/rcu.md
 ---
 
@@ -25,6 +25,15 @@ parent: specs/rcu.md
 
 This phase ships tests, not API. Its deliverable is a release gate: **the framework is not
 considered usable by any consumer until this suite is green under both runners on ARMv8.**
+
+**Outcome (2026-08-01).** `tests/kernel/rcu/TortureTest.cpp`, 14 scenarios. Gate green:
+48/48 RCU (ASan+leak and TSan) and 441/441 Core (ASan and TSan) on ARMv8; kernel cross build
+clean. The suite earned its keep on the first run by finding a real Phase-1 defect — see
+P1-DEC-017: `drainAllQuiescent` claimed a slot's `openBagIndex` bag without moving the cursor,
+so a deleter-retire (legal per RCU-DEC-038, and the shape RadixVM's node deleters have) tripped
+`prepareOpenBag`'s `Free`-or-`Open` assert deterministically. It also caught two bugs in its own
+scenarios, one of them via the ASan oracle doing exactly its job on a pointer read after
+`barrier` had freed it.
 
 ## Dependencies
 
@@ -74,8 +83,8 @@ considered usable by any consumer until this suite is green under both runners o
 |---|---|---|---|---|---|
 | P3-ITEM-001 | Resolved 2026-08-01 → P1-DEC-009 (protocol-point callbacks on the existing `Hooks` policy) | | | How is the "stall a reader at an exact protocol point" hook implemented without leaving instrumentation in production code? | None of the three candidates: the engine's `Hooks` policy template (RCU-DEC-017) already is the injection mechanism, already provably zero-cost in release. The harness `Hooks` spins on atomic gates at named protocol points. |
 | P3-ITEM-002 | Resolved 2026-08-01 → P3-DEC-007 | | | Does the quiet-system residue scenario (RCU-DEC-006) need a real idle thread, or is "thread A stops calling into RCU entirely while B keeps advancing" a faithful model? | Faithful — an idle kernel CPU makes zero RCU calls, so the domain-observable behavior is identical. The stealing-not-owner-drain concern becomes an assertion, not a harness feature; see P3-DEC-007. |
-| P3-ITEM-003 | Open | No | | Should the versioned-cell structure be swapped for a small linked list to exercise multi-node traversal within one section? | An array of cells only ever holds one pointer per section, so it does not exercise the "hold a pointer across several dereferences" shape a radix walk has. A short list is closer without becoming a tree. |
-| P3-ITEM-004 | Deferred | No | | Should a `run_rcu_tests` target be added to `run_all_tests`, given that `run_all_tests` already omits `CoreTestRunnerTSan` and `LibAllocTestRunnerTSan`? | Adding it is right; the pre-existing omissions are a separate cleanup worth doing at the same time so `unit_tests` genuinely means "all tests". |
+| P3-ITEM-003 | Resolved 2026-08-01 → P3-DEC-008 | | | Should the versioned-cell structure be swapped for a small linked list to exercise multi-node traversal within one section? | Yes, and it cost three lines. Each cell publishes a CHAIN of `kChainDepth = 3` payloads; readers walk all of it inside one section. The chain is immutable once published and retired as a unit, so its links need no atomics. |
+| P3-ITEM-004 | Resolved 2026-08-01 | | | Should a `run_rcu_tests` target be added to `run_all_tests`, given that `run_all_tests` already omits `CoreTestRunnerTSan` and `LibAllocTestRunnerTSan`? | Moot for RCU: `run_all_tests` already ran BOTH RCU runners, so the torture scenarios joined the aggregate target by adding the source file; `run_rcu_tests` / `run_rcu_tests_tsan` now exist as this spec's names, aliasing the Phase-2 pair. The anticipated cleanup was then done too — `CoreTestRunnerTSan` and `LibAllocTestRunnerTSan` are now in `run_all_tests`, so every ASan runner is paired with its TSan sibling: 9 runners, 1259 tests, all green. This mattered beyond tidiness — `CoreTestRunnerTSan` is the only coverage of `Core::rcu::EpochDomain`'s concurrency tests under the ARMv8 gate, so the engine's weak-memory validation had been opt-in. **Caveat carried forward:** that runner is the known post-rebuild flake; a red first run after a full rebuild should be re-run before it is believed. |
 
 ## Decisions
 
@@ -88,6 +97,11 @@ considered usable by any consumer until this suite is green under both runners o
 | P3-DEC-005 | Settled | **Stalls are injected, never awaited.** No scenario sleeps hoping a race occurs. | P3-I3. A torture suite that relies on timing luck reports green on a broken build. HAZARD-1's window in particular is far too narrow to hit by chance. Decided 2026-08-01. |
 | P3-DEC-007 | Settled (**assertion corrected same day — final review F4: the original "every retiree on B's thread, residue → 0" fails on a correct build**) | **The quiet-system residue scenario models idleness as "thread A stops calling into the domain" — no real idle thread — with choreographed sealing and a residue-exact assertion: (1) A retires a batch smaller than the advance threshold (so A never self-drains); (2) B advances the epoch (via its own retire + `tryAdvance`) *between* A's batch and A's final retire, so A's final `maybeRotate` seals the batch bag; (3) A quiesces. Assert: every *sealed*-bag retiree of A is destroyed **on B's thread** (deleters record their executor), A's slot never re-enters, and the terminal residue is **exactly** A's open-bag contents — the final retiree — per ITEM-014.** | Resolves P3-ITEM-002. An idle kernel CPU makes zero RCU calls, so the model is observationally exact. The original unqualified assertion demanded reclamation the design explicitly disclaims: A's final `Open` bag is unstealable (I13; the RCU-DEC-031 amendment), so "residue → 0" deterministically fails on a *correct* implementation, and "every retiree on B's thread" is over-strict, since A self-draining its own expired bags pre-quiesce is legal (own-slot-first, P1-DEC-008) — the choreography (batch < threshold; the B-driven advance forcing the seal) is what makes the corrected assertion deterministic (P3-I3). Still fails if stealing is removed — the parent Hazards' requirement that the suite be able to fail — and now also fails if residue exceeds the documented bound. Decided 2026-08-01. |
 | P3-DEC-006 | Provisional | **Scenario set: stutter, ratio sweep, forced stall, quiet-system residue, deleter-retires, nested-section, batch-bound churn, barrier semantics, barrier×bound, dual barriers, deleter-retires-during-barrier, escaped-SafePtr, contended teardown, failed-scenario survival.** (Additions 2026-08-01: first two with RCU-DEC-031/033; last six from subagent review.) **Known-untestable:** migration between `retire` and `barrier` (RCU-DEC-040) is unrepresentable under P3-I2's one-thread-per-slot binding — recorded so it is not presumed covered. | Covers each parent Verification Target that is not already a Phase-1 unit test. Provisional — adversarial review may add scenarios, and the vmsmalloc precedent was that the shipped corpus was smaller and more focused than the spec's. Decided 2026-08-01. |
+
+| P3-DEC-008 | Settled | **Each cell publishes a chain of `kChainDepth = 3` payloads, walked inside one section.** | Resolves P3-ITEM-003. A single cell holds one pointer per section, which does not exercise the "hold a pointer across several dereferences" shape a radix walk has — the shape R5 exists for. The chain is immutable once published and retired as a unit, so its links are plain pointers and its retire is a loop over `RetireHead`s that never alias the chain links. Decided 2026-08-01. |
+| P3-DEC-009 | Settled | **The escaped-`SafePtr` scenario is compiled unconditionally but armed only by `CROCOS_RCU_ESCAPE_DEMO=1` in the environment.** | The scenario's PASSING behaviour is an ASan abort — which is the oracle working, and also a dead process with no test summary. A release gate that always aborts is not a gate. Compiling it unconditionally keeps it from rotting; the disarmed path asserts its own guard so the test is visibly present and visibly off in every ordinary run. Decided 2026-08-01. |
+| P3-DEC-010 | Settled | **The klog sink gains a capture surface (`tests/kernel/vmsmalloc/mocks/MockKlog.h`), armed per test.** | The forced-stall scenario must assert that RCU-DEC-013's diagnostic *fires*, per the parent Hazards' "a torture suite that cannot fail is worse than none". The diagnostic's only observable is a `klog` line from `~ReadGuard`, and the shared mock discarded unconditionally — so without this the second half of that assertion could only be trusted, not tested. The armed flag is checked before the mutex so the default path stays one relaxed load and vmsmalloc's timed concurrent tests pay nothing. Decided 2026-08-01. |
+| P3-DEC-011 | Settled | **Torture nodes are `new`/`delete`, NOT `retireDestroy`.** | P3-DEC-001's oracle requires a real `free`. `retireDestroy` bottoms out in the mock `VMSubstrate`, which recycles — exactly the Hazards' "mock divergence" case, and it would convert every UAGP into a silent read of recycled-but-valid memory. Phase 2 already covers the `retireDestroy` path; this phase deliberately trades it for the detector. Decided 2026-08-01. |
 
 ## Hazards
 

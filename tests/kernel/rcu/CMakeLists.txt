@@ -22,6 +22,7 @@ set(RCU_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/VeneerTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssertionsTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ConcurrentTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/TortureTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/MockRcuEnv.cpp
     ${VMS_MOCKS}/MockVMSubstrate.cpp
     ${VMS_MOCKS}/MockKernelEnv.cpp
@@ -80,7 +81,13 @@ add_custom_target(run_rcu_integration_tests
     COMMAND KernelRcuIntegrationTestRunner
     DEPENDS KernelRcuIntegrationTestRunner
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Running RCU Phase 2 veneer tests (ASan/leak)")
+    COMMENT "Running RCU veneer + torture tests (ASan/leak)")
+
+# specs/rcu-phase-3.md's names. Phase 3 makes this runner "all RCU tests" rather
+# than "the Phase 2 veneer tests", so these are the ones to reach for; the
+# run_rcu_integration_tests pair is kept because it is what already exists in
+# muscle memory and in this tree's docs.
+add_custom_target(run_rcu_tests DEPENDS run_rcu_integration_tests)
 
 # ─── TSan runner (ARMv8/M1 = primary release gate) ──────────────────────────
 add_executable(KernelRcuIntegrationTestRunnerTSan ${RCU_SOURCES})
@@ -103,4 +110,6 @@ add_custom_target(run_rcu_integration_tests_tsan
     COMMAND KernelRcuIntegrationTestRunnerTSan
     DEPENDS KernelRcuIntegrationTestRunnerTSan
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Running RCU Phase 2 veneer tests (TSan)")
+    COMMENT "Running RCU veneer + torture tests (TSan — the release gate)")
+
+add_custom_target(run_rcu_tests_tsan DEPENDS run_rcu_integration_tests_tsan)

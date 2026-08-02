@@ -17,6 +17,11 @@
 #include <CpuLocal.h>                          // real
 #include <interrupts/InterruptContextDepths.h> // real
 #include "MockCpuLocal.h"
+#include "MockKlog.h"
+
+#include <mutex>
+#include <string>
+#include <atomic>
 
 // ─── arch: per-CPU base register + logical ID (thread_local) ───────────────
 namespace arch {
@@ -45,11 +50,46 @@ namespace test {
 // ─── kernel: logging + panic plumbing ──────────────────────────────────────
 namespace kernel {
 namespace {
+    // Discards by default. When capture is armed it accumulates instead, so a
+    // test can assert that a diagnostic actually fired rather than trusting it
+    // (MockKlog.h). The armed flag is checked before the lock so the default
+    // path stays a single relaxed load — vmsmalloc's tests log inside timed
+    // concurrent sections and must not pay for a mutex they never use.
+    std::atomic<bool> gKlogCapturing{false};
+    std::mutex        gKlogMutex;
+    std::string       gKlogBuffer;
+
     class NullStream : public Core::PrintStream {
     protected:
-        void putString(const char*) override {}
+        void putString(const char* s) override {
+            if (!gKlogCapturing.load(std::memory_order_acquire)) return;
+            std::lock_guard<std::mutex> lock(gKlogMutex);
+            gKlogBuffer += s;
+        }
     };
     NullStream gNullStream;
+}
+
+namespace test {
+    void beginKlogCapture() noexcept {
+        std::lock_guard<std::mutex> lock(gKlogMutex);
+        gKlogBuffer.clear();
+        gKlogCapturing.store(true, std::memory_order_release);
+    }
+
+    void endKlogCapture() noexcept {
+        gKlogCapturing.store(false, std::memory_order_release);
+    }
+
+    bool klogCaptureContains(const char* needle) noexcept {
+        std::lock_guard<std::mutex> lock(gKlogMutex);
+        return gKlogBuffer.find(needle) != std::string::npos;
+    }
+
+    size_t klogCaptureLength() noexcept {
+        std::lock_guard<std::mutex> lock(gKlogMutex);
+        return gKlogBuffer.size();
+    }
 }
 
 Core::AtomicPrintStream klog()        { return Core::AtomicPrintStream(gNullStream); }
