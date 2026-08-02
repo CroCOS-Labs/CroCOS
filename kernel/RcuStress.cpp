@@ -114,6 +114,57 @@ namespace rcu_stress {
     Atomic<uint64_t> gCorrupt{0};
     Atomic<uint64_t> gNullReads{0};
 
+    // ── Blocking grace-period primitives (P4-ITEM-003) ─────────────────────
+    //
+    // synchronize and barrier had NO in-kernel caller. Everything else the spike
+    // drives (ReadGuard, protect, retireDestroy, tryAdvance) either returns
+    // promptly or panics; these two BLOCK, so their failure mode is a hang, and
+    // until the P4-DEC-008 watchdog existed a hang was indistinguishable from a
+    // healthy run. They are exercised here for execution-on-target, not for
+    // semantics — the torture suite already owns semantics, and can assert exact
+    // residue and exactly-once destruction, which this phase cannot.
+    //
+    // barrier is the interesting one. Its drive-to-completion predicate is
+    // non-monotone (a remote owner can convert an Open <= e0 bag into a new
+    // member arbitrarily late) and its own comment records that BOTH obvious
+    // formulations of the loop livelock. Here it runs against seven other CPUs
+    // retiring continuously, which is the shape that argument has to survive.
+    //
+    // Durations are measured rather than assumed: both calls freeze this CPU's
+    // watchdog heartbeat for their whole span, so the margin between a healthy
+    // call and the watchdog's stall threshold has to be a measured number, not a
+    // hope. Deliberately NOT beating the heartbeat inside the call — a hung
+    // barrier is exactly what the watchdog should catch.
+    Atomic<uint64_t> gSyncs{0};
+    Atomic<uint64_t> gBarriers{0};
+    Atomic<uint64_t> gSyncMaxNs{0};
+    Atomic<uint64_t> gBarrierMaxNs{0};
+    Atomic<uint64_t> gSyncTotalNs{0};
+    Atomic<uint64_t> gBarrierTotalNs{0};
+
+    // ~1 in 1024 iterations each, per CPU. Both are far costlier than an
+    // iteration, and crowding out the read/retire traffic would erode the
+    // stale-mapping exposure P4-DEC-006 measured as load-bearing — the coverage
+    // this phase exists to provide. So the rate was TUNED AGAINST MEASUREMENT,
+    // not guessed: at 1-in-4096 the means were 169 us (synchronize) and 339 us
+    // (barrier), i.e. ~0.2% of CPU time, with reclaims/preTouch/stale all within
+    // noise of the P4-DEC-006 baseline. 1-in-1024 buys 4x the calls for well
+    // under 1%, which is still comfortably inside the noise.
+    constexpr uint64_t kSyncMask    = 0x3FFull;
+    constexpr uint64_t kBarrierMask = 0x3FFull;
+
+    void recordMax(Atomic<uint64_t>& slot, uint64_t sample) {
+        uint64_t cur = slot.load(RELAXED);
+        while (sample > cur && !slot.compare_exchange_weak(cur, sample, RELAXED, RELAXED)) {}
+    }
+
+    // Printed as mean/max microseconds. The counters are GLOBAL across all CPUs,
+    // like every other counter on the liveness line.
+    [[nodiscard]] uint64_t meanUs(const Atomic<uint64_t>& totalNs, const Atomic<uint64_t>& count) {
+        const uint64_t n = count.load(RELAXED);
+        return n == 0 ? 0 : (totalNs.load(RELAXED) / n) / 1000;
+    }
+
     // ── Hang watchdog (P4-ITEM-005) ────────────────────────────────────────
     //
     // The shutdown timer masks hangs: a livelocked barrier, a stalled grace
@@ -319,6 +370,35 @@ namespace rcu_stress {
         // CPUs' expired bags.
         if ((r >> 40) % 64 == 0) (void)rcu::tryAdvance(rcu::kernelDomain);
 
+        // P4-ITEM-003. Both are called with NO section held — every ReadGuard
+        // above is scoped inside its helper — and from normal context, which is
+        // what their strict RCU-DEC-031 mask requires. All CPUs participate:
+        // concurrent barriers are the case with a livelock argument to survive,
+        // not the solitary one.
+        // A SECOND random word, deliberately: `r`'s upper bits are already spoken
+        // for by the class, cell, write and tryAdvance selectors, and two 10-bit
+        // selectors do not fit in what is left without overlapping each other —
+        // which would correlate "this iteration synchronizes" with "this
+        // iteration barriers" and quietly halve the independent coverage.
+        const uint64_t r2 = next();
+
+        if ((r2 & st::kSyncMask) == 0) {
+            const uint64_t t0 = timing::monoTimens();
+            rcu::synchronize(rcu::kernelDomain);
+            const uint64_t dt = timing::monoTimens() - t0;
+            st::gSyncs.fetch_add(1, RELAXED);
+            st::gSyncTotalNs.fetch_add(dt, RELAXED);
+            st::recordMax(st::gSyncMaxNs, dt);
+        }
+        if (((r2 >> 32) & st::kBarrierMask) == 0) {
+            const uint64_t t0 = timing::monoTimens();
+            rcu::barrier(rcu::kernelDomain);
+            const uint64_t dt = timing::monoTimens() - t0;
+            st::gBarriers.fetch_add(1, RELAXED);
+            st::gBarrierTotalNs.fetch_add(dt, RELAXED);
+            st::recordMax(st::gBarrierMaxNs, dt);
+        }
+
         // The watchdog's only input. Relaxed and uncontended — a private,
         // cache-line-padded slot — so it costs one store per iteration and
         // cannot perturb the workload it is measuring (P4-DEC-004's concern).
@@ -337,6 +417,16 @@ namespace rcu_stress {
                    << " retires=" << st::gRetires.load(RELAXED)
                    << " nullReads=" << st::gNullReads.load(RELAXED)
                    << " corrupt=" << st::gCorrupt.load(RELAXED)
+                   // P4-ITEM-003. syncs/barriers == 0 would mean the blocking
+                   // primitives never ran, which is the state this phase found
+                   // them in — treat a drop to zero as a coverage regression.
+                   // maxUs is the margin against the watchdog's stall threshold.
+                   << " syncs=" << st::gSyncs.load(RELAXED)
+                   << " syncUs=" << st::meanUs(st::gSyncTotalNs, st::gSyncs)
+                   << "/" << (st::gSyncMaxNs.load(RELAXED) / 1000)
+                   << " barriers=" << st::gBarriers.load(RELAXED)
+                   << " barrierUs=" << st::meanUs(st::gBarrierTotalNs, st::gBarriers)
+                   << "/" << (st::gBarrierMaxNs.load(RELAXED) / 1000)
 #ifdef CROCOS_FRESHNESS_STATS
                    << " reclaims=" << mm::VMSubstrate::reclaimedSlabPageCount()
                    << " preTouch=" << rcu::freshnessStats().preTouches
