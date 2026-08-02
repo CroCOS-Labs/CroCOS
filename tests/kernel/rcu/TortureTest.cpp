@@ -711,6 +711,123 @@ TEST_WITH_TIMEOUT_NO_TRACKING(rcuTortureQuietSystemResidue, 60000) {
 }
 
 // ============================================================================
+// A dead slot must not make limbo grow with churn volume
+// ============================================================================
+//
+// The quiet-system scenario above proves the residue bound EXACTLY, but at 11
+// objects and with no concurrent load — so it cannot distinguish "a dead slot
+// contributes O(1)" from "a dead slot contributes O(retires)". This one can:
+// one thread retires a batch and dies, then THOUSANDS of retires happen on the
+// remaining slots, and the surviving residue must still be a few open bags.
+//
+// The property under test is R3. A thread quiet OUTSIDE a section has an
+// inactive slot, so it is invisible to the scan and cannot block advancement;
+// its sealed bags are stealable (RCU-DEC-006); its Open bag is a fixed one-time
+// residue (I13) that cannot grow, because the thread is not retiring any more.
+// Contribution is therefore O(1) per dead slot, not O(retires).
+//
+// If that is ever false — if a dead slot's state could block an advance — the
+// epoch freezes, nothing expires, and residue tracks total churn. The two
+// assertions that catch it are the epoch having moved at all, and residue being
+// bounded by a constant while retires are three orders of magnitude larger.
+//
+// NOT the same as a thread quiet INSIDE a section, which blocks advancement by
+// design and is the accepted EBR weakness — that is rcuTortureForcedStall.
+TEST_WITH_TIMEOUT_NO_TRACKING(rcuTortureDeadSlotDoesNotUnboundLimbo, 90000) {
+    Harness h;
+    TortureDomain td("torture-dead-slot");
+    auto& d = *td;
+
+    constexpr size_t   kDeadSlot    = 3;
+    constexpr size_t   kDeadBatch   = 50;
+    constexpr size_t   kChurnPerCpu = 5000;
+    constexpr size_t   kChurners    = kCpus - 1;          // slots 0..2
+    constexpr size_t   kTotal       = kChurners * kChurnPerCpu + kDeadBatch;
+    // O(slots), NOT O(retires) — each slot contributes at most its own Open bag.
+    // Deliberately generous: the discriminating statement is that kTotal retires
+    // leave under kResidueBound behind, a ratio of well under 1%. A build where a
+    // dead slot blocked advancement would leave residue in the thousands.
+    constexpr size_t   kResidueBound = 8 * Core::rcu::kRetireAdvanceThreshold;   // 512
+
+    resetAccounting(kTotal + 1024);
+    resetFailures();
+
+    // ── Phase 1: one slot retires a batch, then dies ──
+    std::thread dead([&] {
+        worker(static_cast<uint32_t>(kDeadSlot), [&] {
+            for (size_t i = 0; i < kDeadBatch; ++i) {
+                Payload* p = makePayload(0);
+                rcu::ReadGuard g(d);
+                rcu::retire<Payload, &Payload::head, tortureDeleter>(d, p);
+            }
+        });
+    });
+    dead.join();          // joined BEFORE any churn starts, so the slot is
+                          // provably dead for the whole of phase 2
+
+    kernel::test::bindThreadToCpu(0);
+    const uint64_t epochBefore   = rcu::test::epoch(d);
+    const size_t   deadResidue0  = rcu::test::openBagResidue(d, kDeadSlot);
+
+    // ── Phase 2: sustained churn on the surviving slots only ──
+    std::vector<std::thread> threads;
+    for (size_t c = 0; c < kChurners; ++c) {
+        threads.emplace_back([&, c] {
+            worker(static_cast<uint32_t>(c), [&] {
+                for (size_t i = 0; i < kChurnPerCpu; ++i) {
+                    Payload* p = makePayload(0);
+                    {
+                        rcu::ReadGuard g(d);
+                        rcu::retire<Payload, &Payload::head, tortureDeleter>(d, p);
+                    }
+                    if ((i & 15) == 0) (void)rcu::tryAdvance(d);
+                }
+            });
+        });
+    }
+    for (auto& t : threads) t.join();
+    kernel::test::bindThreadToCpu(0);
+
+    ASSERT_EQ(size_t{0}, gWorkerFailures.load());
+
+    // Everything is joined, so the domain is quiescent and introspection is a
+    // measurement rather than a torn view. Drive to a fixed point so that what
+    // remains is only what is structurally unreachable.
+    for (size_t i = 0; i < 64; ++i) (void)rcu::tryAdvance(d);
+
+    const uint64_t epochAfter = rcu::test::epoch(d);
+    const size_t   residue    = rcu::test::totalResidue(d);
+
+    // (1) The dead slot did not freeze the epoch.
+    ASSERT_GT(epochAfter, epochBefore + 1);
+
+    // (2) Residue is O(slots), not O(retires). THE assertion of this scenario.
+    ASSERT_GT(kTotal, kResidueBound * 4);      // the test is only meaningful if
+                                               // churn dwarfs the bound
+    ASSERT_TRUE(residue <= kResidueBound);
+
+    // (3) ...and it is exactly the per-slot Open bags — everything stealable was
+    // stolen, including the dead slot's sealed bags (RCU-DEC-006).
+    size_t openFloor = 0;
+    for (size_t s = 0; s < kCpus; ++s) openFloor += rcu::test::openBagResidue(d, s);
+    ASSERT_EQ(openFloor, residue);
+
+    // (4) The dead slot's own contribution cannot have grown past what it
+    // retired before dying, and it never re-entered.
+    ASSERT_FALSE(rcu::test::inSection(d, kDeadSlot));
+    ASSERT_TRUE(rcu::test::openBagResidue(d, kDeadSlot) <= deadResidue0);
+
+    // (5) So nearly everything was reclaimed WITHOUT the teardown drain.
+    ASSERT_EQ(kTotal - residue, gDestroyed.load());
+
+    ASSERT_EQ(residue, rcu::test::drainAllQuiescent(d));
+    assertNothingLostOrDoubled(kTotal);
+    ASSERT_EQ(size_t{0}, rcu::test::totalResidue(d));
+    td.finish();
+    teardownAccounting();
+}
+
+// ============================================================================
 // Deleter-retires — reentrancy into retire from inside a drain
 // ============================================================================
 TEST_WITH_TIMEOUT_NO_TRACKING(rcuTortureDeleterRetires, 60000) {

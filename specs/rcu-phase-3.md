@@ -103,6 +103,8 @@ scenarios, one of them via the ASan oracle doing exactly its job on a pointer re
 | P3-DEC-010 | Settled | **The klog sink gains a capture surface (`tests/kernel/vmsmalloc/mocks/MockKlog.h`), armed per test.** | The forced-stall scenario must assert that RCU-DEC-013's diagnostic *fires*, per the parent Hazards' "a torture suite that cannot fail is worse than none". The diagnostic's only observable is a `klog` line from `~ReadGuard`, and the shared mock discarded unconditionally — so without this the second half of that assertion could only be trusted, not tested. The armed flag is checked before the mutex so the default path stays one relaxed load and vmsmalloc's timed concurrent tests pay nothing. Decided 2026-08-01. |
 | P3-DEC-011 | Settled | **Torture nodes are `new`/`delete`, NOT `retireDestroy`.** | P3-DEC-001's oracle requires a real `free`. `retireDestroy` bottoms out in the mock `VMSubstrate`, which recycles — exactly the Hazards' "mock divergence" case, and it would convert every UAGP into a silent read of recycled-but-valid memory. Phase 2 already covers the `retireDestroy` path; this phase deliberately trades it for the detector. Decided 2026-08-01. |
 
+| P3-DEC-012 | Settled | **A dedicated scenario asserts that a permanently dead slot does not make limbo grow with churn volume**, separate from the quiet-system residue scenario. | The quiet-system scenario proves the residue bound *exactly*, but at 11 objects with no concurrent load — so it cannot distinguish "a dead slot contributes O(1)" from "a dead slot contributes O(retires)", which is the question anyone worried about unbounded growth is actually asking. The new scenario runs 15,050 retires on the surviving slots after the dead one is joined, and asserts (a) the epoch still advanced, (b) residue ≤ a constant independent of churn, (c) residue is exactly the per-slot Open bags. Verified falsifiable: making the dead thread die *inside* a section — the case that genuinely does block advancement, and the accepted EBR weakness — freezes the epoch and fails assertion (a). Decided 2026-08-01. |
+
 ## Hazards
 
 - **A torture suite that cannot fail is worse than none.** The forced-stall scenario must assert
@@ -130,6 +132,7 @@ scenarios, one of them via the ASan oracle doing exactly its job on a pointer re
 | No data races in the protocol | TSan runner on ARMv8 (release gate) |
 | Full drain occurs when all readers pause | Stutter scenario: assert live-object count returns to zero |
 | Reclamation stalls while a reader holds a section, and the diagnostic fires | Forced-stall scenario asserting both |
+| A non-participating slot contributes O(1), not O(retires) (R3) | Dead-slot scenario: 15,050 retires across the live slots leave ~70 objects; falsified by making the dead thread die *inside* a section, which freezes the epoch |
 | Residue → 0 on a quiet system with no scheduler/IPI input (RCU-DEC-006) | Quiet-system scenario: one thread retires then stops touching RCU; another advances; assert full reclamation |
 | HAZARD-1 interlock holds under contention | Injected-stall scenario at the push/steal window, under TSan |
 | Deleters that retire are safe | Deleter-retires scenario |
@@ -157,6 +160,7 @@ ASan; any reader that observes a torn or stale-magic payload trips an assertion.
 | Stutter | All readers pause simultaneously; writers keep retiring; then everyone resumes | Drain never completes → live count stays non-zero |
 | Ratio sweep | Reader:writer ratios from all-readers to all-writers | Contention-dependent bugs in the bag machine |
 | Forced stall | One reader holds a section for a long, *bounded* interval | Reclamation must stall and the diagnostic must fire |
+| Dead slot vs churn volume | One slot retires a batch and is joined; thousands of retires then run on the OTHER slots; assert the epoch still advanced and residue stayed O(slots) | A dead slot blocking advancement — residue would track total churn instead of a few open bags |
 | Quiet-system residue | Thread A retires sub-threshold, B forces an epoch advance, A's final retire seals the batch bag, A quiesces (P3-DEC-007 choreography) | A's sealed-bag retirees destroyed on B's thread; terminal residue exactly A's open-bag contents — fails if stealing (RCU-DEC-006) is broken *or* if residue exceeds the ITEM-014 bound |
 | Deleter retires | Deleters retire a second object | Reentrancy into `retire` during a drain |
 | Nested sections | Sections nested 2-3 deep, plus a simulated interrupt-nested entry | Nesting bookkeeping (I5) |
