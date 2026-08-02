@@ -200,6 +200,53 @@ says they passed.
 7. **Green on both runners on ARMv8**; register in `run_all_tests` (and fix the pre-existing
    `CoreTestRunnerTSan` / `LibAllocTestRunnerTSan` omissions per P3-ITEM-004).
 
+## Beyond the gate — the endurance/performance soak
+
+`tests/kernel/rcu/SoakTest.cpp` is **not part of this phase's gate and not part of
+`run_all_tests`**. It ships in its own executables (`KernelRcuSoakRunner{,TSan}`,
+both `EXCLUDE_FROM_ALL`) behind `run_rcu_soak` / `run_rcu_soak_tsan`, and the test is
+disarmed unless `CROCOS_RCU_SOAK_SECONDS` is set. An endurance test inside the
+correctness gate is a gate people stop running.
+
+It exists for two questions this phase's scenarios deliberately do not answer:
+
+- **Memory overhead** — peak/p50/p90/p99 limbo occupancy (objects retired but not
+  yet destroyed) under sustained churn with threads periodically going quiet.
+  Measured at the *test's* accounting layer, not by sampling the engine:
+  `totalResidue` on a live domain walks bag node lists concurrently with a drainer
+  holding one `Claimed`, which is a real UAF risk under ASan and a true positive
+  under TSan. Both `DebugIntrospection` headers already say snapshots assume a
+  quiescent domain; the test-side counter measures the same quantity safely.
+- **Read/update throughput and latency.** Three runners ship: ASan (UAGP oracle),
+  TSan (race oracle), and **Perf** (`-O2 -g -fno-omit-frame-pointer`, no
+  sanitizer) — the only one whose numbers mean anything. ASan instruments every
+  load and store and TSan additionally serialises through shadow memory, so both
+  inflate latency by roughly an order of magnitude. Perf is *not* a correctness
+  runner: the assertions still hold there, but with no sanitizer behind them a
+  use-after-grace-period reads recycled bytes silently. Run an oracle first.
+
+  The report calibrates its own instrument before using it — `Clock::now()` pair
+  cost at p50/p90 plus the observed clock tick — because on an uninstrumented
+  build a read section costs the same order as the measurement. On Apple Silicon
+  the tick is 41 ns, which quantises every latency figure and is the number that
+  bounds their precision. Calibration is reported, never subtracted.
+
+  First measured baseline (2026-08-01, M1, 60 s x 8 threads, uninstrumented):
+  9.1 M reads/s, 1.3 M updates/s, 3.9 M retires/s; read latency
+  p50 192 / p90 768 / p99 1024 ns; update p50 768 / p90 2048 / p99 8192 ns.
+
+Threads nap *outside* any section — the RCU-DEC-006 quiet-CPU case at scale, not
+the forced-stall case. It feeds parent ITEM-005, which cannot be answered until a
+RadixVM-shaped workload exists but now has a measurement rig waiting for one.
+
+One harness change was required: `kernel::timing::test::setMonoStep(0)`. The mock
+`monoTimens` auto-advances a *shared* counter per call, so with N threads looping
+sections a section's measured "elapsed" tracks total call volume rather than its
+own duration — every `~ReadGuard` trips RCU-DEC-013's 100 ms threshold, and each
+warning takes `AtomicPrintStream`'s **process-wide spinlock**, serialising exactly
+the threads being measured. Freezing the step removes a harness artifact, not a
+real signal.
+
 ## References
 
 - `specs/rcu.md` — parent; Verification Targets and Testing Approach; RCU-DEC-031/033/034/035

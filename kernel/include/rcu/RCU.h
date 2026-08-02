@@ -64,7 +64,23 @@
 // DEBUG_BUILD but its <kassert.h> mock throws unconditionally, so the harness
 // opts the same bodies in explicitly — otherwise the negative tests in
 // tests/kernel/rcu would be testing code that was compiled out.
-#if defined(DEBUG_BUILD) || defined(CROCOS_RCU_TEST_HARNESS)
+//
+// CROCOS_RCU_RELEASE_CHECKS overrides that opt-in, and exists for exactly one
+// consumer: the uninstrumented soak runner. Tying the checks to
+// CROCOS_RCU_TEST_HARNESS meant every harness build measured the DEBUG read
+// path — the stall stamp, assertInSection, the context and pinning checks — so
+// the "one store plus one fence" release path this file advertises had never
+// actually been measured. Profiling on 2026-08-01 put those checks at ~8% of
+// on-CPU work with the stall stamp alone once at 34%.
+//
+// It does NOT gate DebugIntrospection, which keys off CROCOS_RCU_TEST_HARNESS
+// independently — so a release-checks build still gets drainAllQuiescent and
+// totalResidue, and the engine's own asserts are untouched. Defining this in
+// anything but a benchmark target silently removes the checks that catch
+// caller-contract violations.
+#if defined(CROCOS_RCU_RELEASE_CHECKS)
+#define CROCOS_RCU_DEBUG_CHECKS 0
+#elif defined(DEBUG_BUILD) || defined(CROCOS_RCU_TEST_HARNESS)
 #define CROCOS_RCU_DEBUG_CHECKS 1
 #else
 #define CROCOS_RCU_DEBUG_CHECKS 0

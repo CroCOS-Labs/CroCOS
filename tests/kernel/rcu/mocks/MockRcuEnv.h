@@ -28,6 +28,12 @@ namespace kernel::timing::test {
     // Jump the counter forward, for driving the stall detector past its
     // threshold without executing 100 ms of anything.
     void advanceMonoTime(uint64_t ns) noexcept;
+
+    // Set the per-call auto-advance step (default 1000 ns; resetMonoTime
+    // restores it). Pass 0 to freeze the clock. The soak test does exactly that
+    // — see the rationale at the definition, which is about the shared counter
+    // making "elapsed" a function of other threads' call volume.
+    void setMonoStep(uint64_t ns) noexcept;
 }
 
 namespace arch::test {
