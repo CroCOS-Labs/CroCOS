@@ -103,7 +103,6 @@ namespace {
     TestNode* makeNode(int id) {
         auto* n = new TestNode();
         n->id = id;
-        n->head.deleter = &trackingDeleter;
         return n;
     }
 
@@ -128,9 +127,10 @@ namespace {
     // under it. Note that is writer-traversal safety, NOT reclamation safety:
     // reclamation safety comes from kRetireFence.
     template <typename D>
-    void retireInSection(D& d, size_t slot, TestNode* n) {
+    void retireInSection(D& d, size_t slot, TestNode* n,
+                         void (*deleter)(RetireHead*) = &trackingDeleter) {
         d.readLock(slot);
-        d.retire(slot, &n->head);
+        d.retire(slot, &n->head, deleter);
         d.readUnlock(slot);
     }
 
@@ -385,7 +385,7 @@ TEST(rcuRetireFromOwnSectionBlocksOwnAdvance) {
     resetTracking();
 
     d.readLock(0);
-    d.retire(0, &makeNode(0)->head);
+    d.retire(0, &makeNode(0)->head, &trackingDeleter);
 
     // Snapshot == epoch, so the first advance goes through.
     ASSERT_TRUE(d.tryAdvance(0));
@@ -480,11 +480,19 @@ TEST(rcuRotationKeepsExactlyOneOpenBagPerSlot) {
     ASSERT_EQ(id, gDestroyCount);
 }
 
-TEST(rcuOnPreTouchFiresOncePerDrainedNode) {
+TEST(rcuOnPreTouchFiresOncePerRetireAndPerDrain) {
     // RCU-DEC-017. A drainer may be a different CPU than the retirer, walking
     // intrusive links in slab memory whose page may have been reclaimed and
     // re-backed — the vmsmalloc DEC-047 bug class — so the hook must fire per
-    // node, before any read of that node's RetireHead fields.
+    // node, before any ACCESS of that node's RetireHead fields.
+    //
+    // BOTH SIDES, and that is the point of this test's shape: `retire` WRITES
+    // node->deleter and node->next, and those writes need freshness for exactly
+    // the reason the drain's reads do. The retiring CPU is routinely not the
+    // allocating one. This originally asserted drain-side firings only, and the
+    // Phase 4 in-kernel stress found the write side missing — a stale mapping
+    // swallowed the deleter store and the drainer then read a null deleter off
+    // the real page (a panic in debug; a null call in release).
     ReaderSlot slots[2]{};
     Owned<HookDomain> owned(slots, size_t{2});
     HookDomain& d = *owned;
@@ -492,20 +500,21 @@ TEST(rcuOnPreTouchFiresOncePerDrainedNode) {
     resetHooks();
 
     for (int i = 0; i < 5; ++i) retireInSection(d, 0, makeNode(i));
+    ASSERT_EQ(size_t{5}, gHooks.preTouchCount);   // retire side: one per node
 
     advanceEpochs(d, 1, 1);                  // epoch 1: bag tagged 0 is not yet expired
     retireInSection(d, 0, makeNode(5));      // rotate + seal at tag 0
-    ASSERT_EQ(size_t{0}, gHooks.preTouchCount);
+    ASSERT_EQ(size_t{6}, gHooks.preTouchCount);   // ...including this one
     ASSERT_EQ(0, gDestroyCount);
     ASSERT_TRUE(gHooks.sealCount >= 1);
 
     advanceEpochs(d, 1, 1);                  // epoch 2: the sweep inside tryAdvance drains it
     ASSERT_EQ(5, gDestroyCount);
-    ASSERT_EQ(size_t{5}, gHooks.preTouchCount);
+    ASSERT_EQ(size_t{11}, gHooks.preTouchCount);  // 6 retires + 5 drained
     ASSERT_TRUE(gHooks.claimCount >= 1);
 
     owned.finish();
-    ASSERT_EQ(size_t{6}, gHooks.preTouchCount);   // the teardown drain touches the rest
+    ASSERT_EQ(size_t{12}, gHooks.preTouchCount);  // the teardown drain touches the last one
 }
 
 // ============================================================
@@ -718,8 +727,7 @@ namespace {
         for (int i = 0; i < gChildrenPerParent; ++i) {
             auto* child = new TestNode();
             child->id = gChildIdBase++;
-            child->head.deleter = &trackingDeleter;
-            gChildDomain->retire(gChildSlot, &child->head);
+            gChildDomain->retire(gChildSlot, &child->head, &trackingDeleter);
         }
         delete n;
     }
@@ -727,9 +735,8 @@ namespace {
     void retireParent(PlainDomain& d, size_t slot, int id) {
         auto* n = new TestNode();
         n->id = id;
-        n->head.deleter = &parentDeleter;
         d.readLock(slot);
-        d.retire(slot, &n->head);
+        d.retire(slot, &n->head, &parentDeleter);
         d.readUnlock(slot);
     }
 }
@@ -790,9 +797,8 @@ TEST(rcuBlockingPrimitivesAssertFromDeleterContextInsteadOfHanging) {
 
     auto* n = new TestNode();
     n->id = 0;
-    n->head.deleter = &deleterThatCallsBlockingPrimitives;
     d.readLock(0);
-    d.retire(0, &n->head);
+    d.retire(0, &n->head, &deleterThatCallsBlockingPrimitives);
     d.readUnlock(0);
 
     d.barrier(0);
@@ -817,7 +823,7 @@ TEST(rcuRetireOutsideASectionAsserts) {
     resetTracking();
 
     auto* n = makeNode(0);
-    EXPECT_ASSERT_FAILURE((*owned).retire(0, &n->head));
+    EXPECT_ASSERT_FAILURE((*owned).retire(0, &n->head, &trackingDeleter));
     ASSERT_EQ(0, gDestroyCount);
     delete n;                                 // it never entered a bag
 

@@ -107,7 +107,6 @@ namespace {
     CNode* makeCNode(int id) {
         auto* n = new CNode();
         n->id = id;
-        n->head.deleter = &countingDeleter;
         return n;
     }
 
@@ -188,7 +187,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(rcuConcurrentReadersAndWriters, 30000) {
                 // unpinned writer can have the node reclaimed under it.
                 d.readLock(w);
                 CNode* old = link.exchange(fresh, std::memory_order_acq_rel);
-                d.retire(w, &old->head);
+                d.retire(w, &old->head, &countingDeleter);
                 d.readUnlock(w);
 
                 if ((i & 15) == 0) d.tryAdvance(w);
@@ -260,7 +259,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(rcuConcurrentOwnerPushWhileThievesDrain, 30000) {
     threads.emplace_back([&]() {
         for (int i = 0; i < kRetireCount; ++i) {
             d.readLock(kOwner);
-            d.retire(kOwner, &makeCNode(i)->head);
+            d.retire(kOwner, &makeCNode(i)->head, &countingDeleter);
             d.readUnlock(kOwner);
             if ((i & 7) == 0) d.tryAdvance(kOwner);
         }
@@ -315,14 +314,14 @@ TEST_WITH_TIMEOUT_NO_TRACKING(rcuConcurrentResealHandoff, 30000) {
     for (int round = 0; round < kRounds; ++round) {
         for (int i = 0; i < kPerRound; ++i) {
             d.readLock(0);
-            d.retire(0, &makeCNode(id++)->head);
+            d.retire(0, &makeCNode(id++)->head, &countingDeleter);
             d.readUnlock(0);
         }
         // Rotate the filled bag out (sealing it at its own tag), then age it past
         // the I2 gate so the thieves below have something to fight over.
         d.tryAdvance(1);
         d.readLock(0);
-        d.retire(0, &makeCNode(id++)->head);
+        d.retire(0, &makeCNode(id++)->head, &countingDeleter);
         d.readUnlock(0);
         d.tryAdvance(1);
         d.tryAdvance(1);

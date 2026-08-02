@@ -282,9 +282,17 @@ namespace Core::rcu {
     //     memory, whose pages are subject to reclaimSlabPage — the vmsmalloc
     //     DEC-047 stale-TLB bug class. The Phase-2 veneer supplies a hook calling
     //     VMSubstrate::ensureTLBEntryFresh. It fires once per node, before ANY
-    //     read of that node's RetireHead fields, and covers ONLY those fields —
-    //     not the object body and not anything the deleter reaches through.
-    //     A Hooks policy that omits the freshness call is a Phase-2 bug.
+    //     ACCESS — read OR write — of that node's RetireHead fields, and covers
+    //     ONLY those fields — not the object body and not anything the deleter
+    //     reaches through. A Hooks policy that omits the freshness call is a
+    //     Phase-2 bug.
+    //
+    //     BOTH SIDES CALL IT: drainClaimedBag before reading next/deleter, and
+    //     retire before writing them. The write side was missing until the
+    //     Phase 4 in-kernel stress found it on its first boot — the retiring CPU
+    //     is routinely not the allocating one, so its stale mapping swallowed
+    //     the deleter store and the drainer read a null deleter off the real
+    //     page. "read" in the original wording is why it was easy to miss.
     //
     //   the named protocol points — test instrumentation. The torture harness
     //     supplies a Hooks whose points spin on atomic gates, inducing exactly the
@@ -322,7 +330,10 @@ namespace Core::rcu {
         // the winner touches head. The HAZARD-1 race window.
         void onAfterClaim(size_t, size_t) const noexcept {}
 
-        // Per node, before any read of its RetireHead fields (RCU-DEC-017).
+        // Per node, before any ACCESS — read OR write — of its RetireHead
+        // fields (RCU-DEC-017). "Read" was the original wording and it was
+        // wrong: `retire` writes node->deleter and node->next, and those writes
+        // need freshness for exactly the same reason the drain's reads do.
         void onPreTouch(RetireHead*) const noexcept {}
     };
 
@@ -487,11 +498,37 @@ namespace Core::rcu {
         //
         // Forward progress for the entire framework is pulled from this path
         // (RCU-DEC-005). No daemon, no tick, no IPI.
-        void retire(size_t slot, RetireHead* node) CROCOS_RCU_NOEXCEPT {
+        void retire(size_t slot, RetireHead* node,
+                    void (*deleter)(RetireHead*)) CROCOS_RCU_NOEXCEPT {
             assert(slot < slotCount, "rcu: slot index out of range");
             assert(node != nullptr, "rcu: retire of a null node");
+            assert(deleter != nullptr, "rcu: retire with a null deleter");
+
+            // RCU-DEC-017, and it must be the FIRST thing that touches *node.
+            // Everything below — the double-retire read, the deleter store, and
+            // pushNode's write to node->next — accesses RetireHead fields that
+            // may live in ANOTHER CPU's slab memory: under RCU-DEC-006 stealing
+            // the retiring CPU is routinely not the allocating one, so this CPU's
+            // TLB entry for that page can be stale (the vmsmalloc DEC-047 class).
+            //
+            // THE DELETER STORE IS WHY THIS MOVED HERE. It used to live in the
+            // Phase-2 veneer, ahead of this call and with no freshness of its
+            // own, so it landed on the stale mapping while the drainer — which
+            // DOES refresh, via onPreTouch in drainClaimedBag — then read a node
+            // whose deleter was still null. In a debug kernel that is the
+            // "retired node has no deleter" assert; in release the assert is
+            // gone and it is a call through a null function pointer. Found by
+            // the Phase 4 in-kernel stress on its first boot.
+            hooks.onPreTouch(node);
+
             assert(node->next == nullptr,
                    "rcu: retire of an already-linked RetireHead (double retire)");
+            // Set HERE, not by the caller: this is the only point at which the
+            // node is known to be fresh on this CPU, and making the engine the
+            // single writer of every RetireHead field is what keeps that
+            // guarantee from depending on caller discipline.
+            node->deleter = deleter;
+
             ReaderSlot& s = slots[slot];
             // RCU-DEC-019 as amended by RCU-DEC-038. A WRITER unlinking from the
             // live structure still requires a section unconditionally — it

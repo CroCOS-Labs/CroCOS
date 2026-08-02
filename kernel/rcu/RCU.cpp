@@ -368,11 +368,15 @@ void retireNode(Domain& d, Core::rcu::RetireHead* node,
     assert(preemptionDisabled(), "rcu: retire with preemption enabled");
     assert(cpuPinned(), "rcu: retire without CPU pinning");
 #endif
-    node->deleter = deleter;
+    // The deleter store used to live HERE, ahead of the engine call and with no
+    // freshness of its own — which meant it landed on a stale mapping whenever
+    // the retiring CPU was not the allocating one. It now happens inside the
+    // engine, after onPreTouch. See EpochDomain::retire.
+    //
     // The section / drain / teardown precondition (RCU-DEC-038) is asserted by
     // the engine, which is the only layer that can see slot.inDrain and
     // teardownActive. Not duplicated here.
-    Access::engine(d).retire(kernel::getLogicalProcessorID(), node);
+    Access::engine(d).retire(kernel::getLogicalProcessorID(), node, deleter);
 }
 
 }   // namespace detail
