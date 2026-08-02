@@ -6,6 +6,7 @@ components:
   - specs/rcu-phase-1.md
   - specs/rcu-phase-2.md
   - specs/rcu-phase-3.md
+  - specs/rcu-phase-4.md
 ---
 
 # RCU — Safe Memory Reclamation
@@ -783,8 +784,10 @@ Three layers:
    forced-stall injection, and the RCU-DEC-006 quiet-system residue phase.
 
 The in-kernel stress (real vmsmalloc nodes, real `SafePtr` freshness, real interrupt-context
-asserts across 8 QEMU CPUs) is deliberately **out of scope for this spec tree** and will be
-planned once the framework is proven — mirroring how vmsmalloc Phase 9 followed Phase 8.
+asserts across 8 QEMU CPUs) was deferred out of this document and is now **`specs/rcu-phase-4.md`**
+— mirroring how vmsmalloc Phase 9 followed Phase 8. It found P1-DEC-018 on its first boot,
+which is the concrete answer to ITEM-021's warning that Phase 3 green must not be read as
+"validated on the target".
 
 ## References
 
