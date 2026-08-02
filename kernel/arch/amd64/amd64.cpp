@@ -4,6 +4,7 @@
 
 #include "arch/amd64/amd64.h"
 #include <kernel.h>
+#include <kexit.h>
 #include <kconfig.h>
 #include <core/str.h>
 #include <acpi.h>
@@ -124,9 +125,7 @@ namespace arch::amd64{
         asm volatile("mov %%cr2, %0" : "=r"(faultingAccess));
         klog() << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << " accessing " << faultingAccess << "\n";
         print_stacktrace(&frame.rbp);
-        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
-        asm volatile("cli; hlt");
-        __builtin_unreachable();
+        kernel::exitToHost(kernel::ExitStatus::PageFault);
     }
 
     bool supportsNXBit() {
@@ -150,9 +149,7 @@ namespace arch::amd64{
     void unhandledExceptionHandler(InterruptFrame& frame) {
         klog() << "Unhandled exception " << frame.vector_index << " at IP " << (void*)frame.rip << " on processor " << getCurrentProcessorID() << "\n";
         print_stacktrace(&frame.rbp);
-        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
-        asm volatile("cli; hlt");
-        __builtin_unreachable();
+        kernel::exitToHost(kernel::ExitStatus::UnhandledException);
     }
 
     bool setupInterruptControllers() {

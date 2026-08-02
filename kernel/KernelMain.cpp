@@ -70,7 +70,9 @@ namespace kernel{
         klog() << "Enqueuing shutdown\n";
         timing::enqueueEvent([] {
             klog() << "\nGoodbye :)\n";
-            asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+            // The one path that reports success. Every other termination site
+            // reports a nonzero status (specs/rcu-phase-4.md, P4-ITEM-006).
+            exitToHost(ExitStatus::Success);
         }, 20000);
         return true;
     }

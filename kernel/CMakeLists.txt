@@ -40,6 +40,7 @@ message(STATUS "Kernel libgcc: ${_crocos_kernel_libgcc}")
 
 set(KERNEL_SRC
         arch/amd64/amd64.cpp
+        arch/amd64/hostExit.cpp
         arch/amd64/InstructionWrappers.cpp
         mm/PageAllocator.cpp
         arch/amd64/SerialPort.cpp

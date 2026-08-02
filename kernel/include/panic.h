@@ -6,6 +6,7 @@
 #define CROCOS_PANIC_H
 
 #include "kernel.h"
+#include "kexit.h"
 
 #define PANIC(...) kernel::panic<true>(__FILE__, __LINE__, __VA_ARGS__)
 
@@ -24,14 +25,15 @@ namespace kernel{
         if constexpr (stacktrace) {
             print_stacktrace();
         }
-#ifdef __x86_64__
-        //Give QEMU some time to actually print the panic message before quitting
-        for(auto i = 0; i < 1000; i++){
-            asm volatile("pause");
-        }
-        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604)); //Quit qemu
-        for(;;)
-            asm volatile("hlt");
+        // Reports a NONZERO status to the host, unlike the shutdown path — a
+        // panic and a clean `Goodbye :)` used to be indistinguishable to any
+        // automated caller (specs/rcu-phase-4.md, P4-ITEM-006).
+        //
+        // Excluded under CROCOS_TESTING: the kernel sources that reach here are
+        // also compiled into the userspace test runners, which have no ports to
+        // write to and their own way of reporting a failed assertion.
+#if defined(__x86_64__) && !defined(CROCOS_TESTING)
+        exitToHost(ExitStatus::Panic);
 #endif
     }
 }

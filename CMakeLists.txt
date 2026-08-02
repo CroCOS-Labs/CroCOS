@@ -35,10 +35,23 @@ add_custom_target(build_stress_tests
         USES_TERMINAL
 )
 
+# The channel through which the kernel reports a FAILURE status to the host.
+#
+# Without it every termination site wrote the same ACPI poweroff and QEMU exited
+# 0 through all of them, so a clean `Goodbye :)`, a debug PANIC and a page fault
+# on every CPU were indistinguishable to any automated caller (see
+# specs/rcu-phase-4.md, P4-ITEM-006). The success path still uses ACPI and still
+# exits 0; kernel::exitToHost writes a failure status here instead, and QEMU
+# exits (status << 1) | 1 — always odd, hence never confusable with success.
+#
+# Deliberately NOT added to qmon/kdebug: those are gdb stubs, where halting on a
+# fault so it can be inspected beats exiting out from under the debugger.
+set(CROCOS_QEMU_EXIT_DEVICE -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+
 add_custom_target(run
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         DEPENDS Kernel
-        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -smp 8 -m 256M -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
+        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -smp 8 -m 256M ${CROCOS_QEMU_EXIT_DEVICE} -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
         COMMENT "Running QEMU"
         USES_TERMINAL
 )
@@ -74,6 +87,7 @@ add_custom_target(run_numa
             -numa dist,src=2,dst=0,val=30
             -numa dist,src=1,dst=2,val=25
             -numa dist,src=2,dst=1,val=25
+            ${CROCOS_QEMU_EXIT_DEVICE}
             -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
         COMMENT "Running QEMU with 3-node NUMA topology"
         USES_TERMINAL
@@ -111,6 +125,7 @@ add_custom_target(run_numa_hmat
             -numa hmat-lb,initiator=1,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=41943040
             -numa hmat-lb,initiator=1,target=2,hierarchy=memory,data-type=access-latency,latency=60000
             -numa hmat-lb,initiator=1,target=2,hierarchy=memory,data-type=access-bandwidth,bandwidth=12582912
+            ${CROCOS_QEMU_EXIT_DEVICE}
             -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
         COMMENT "Running QEMU with 3-node NUMA topology and HMAT"
         USES_TERMINAL
